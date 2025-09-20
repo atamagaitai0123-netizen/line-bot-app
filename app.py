@@ -1,32 +1,61 @@
+import os
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
-from openai import OpenAI
-import os
-import tempfile
-from pdf_reader import check_pdf  # ← 追加: PDF解析関数を利用
 
+from supabase import create_client
+import pdf_reader
+
+# Flask
 app = Flask(__name__)
 
-# 環境変数からキーを取得
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-
+# LINE API
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# OpenAIクライアントを初期化
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Supabase 接続
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-@app.route("/callback", methods=["POST"])
+# ========== Supabase 保存 ==========
+def save_grades(user_id, results):
+    for category, info in results.items():
+        supabase.table("grades").insert({
+            "user_id": user_id,
+            "category": category,
+            "required": info["必要"],
+            "earned": info["取得"]
+        }).execute()
+
+
+# ========== Supabase 参照 ==========
+def get_remaining(user_id):
+    data = supabase.table("grades").select("*").eq("user_id", user_id).execute()
+    if not data.data:
+        return "まだ成績データが登録されていません。PDFを送ってください。"
+
+    messages = []
+    for row in data.data:
+        req = row["required"]
+        got = row["earned"]
+        if got is None:
+            continue
+        if got < req:
+            messages.append(f"{row['category']}：あと {req - got} 単位")
+    if not messages:
+        return "すべての要件を満たしています 🎉"
+    return "\n".join(messages)
+
+
+# ========== LINE Webhook ==========
+@app.route("/callback", methods=['POST'])
 def callback():
-    # X-Line-Signature ヘッダーを取得
-    signature = request.headers["X-Line-Signature"]
-
-    # リクエストボディを取得
+    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
 
     try:
@@ -34,67 +63,48 @@ def callback():
     except InvalidSignatureError:
         abort(400)
 
-    return "OK"
+    return 'OK'
 
 
-# -------------------------
-# テキストメッセージ受信時
-# -------------------------
+# ========== メッセージイベント ==========
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
-    user_text = event.message.text
+def handle_message(event):
+    user_id = event.source.user_id
+    text = event.message.text.strip()
+
+    if "あと何単位" in text:
+        reply = get_remaining(user_id)
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    else:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="PDFを送ってください📄"))
+
+
+# ========== ファイル(PDF)イベント ==========
+@handler.add(MessageEvent, message=FileMessage)
+def handle_file(event):
+    user_id = event.source.user_id
+    message_content = line_bot_api.get_message_content(event.message.id)
+
+    file_path = f"/tmp/{event.message.file_name}"
+    with open(file_path, "wb") as f:
+        for chunk in message_content.iter_content():
+            f.write(chunk)
 
     try:
-        # OpenAI API に問い合わせ
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "あなたは学生の履修相談をサポートするAIです。"},
-                {"role": "user", "content": user_text}
-            ],
-        )
-        reply_text = response.choices[0].message.content.strip()
+        # PDF解析
+        results, formatted_text = pdf_reader.check_pdf(file_path, 0)
+
+        # Supabase 保存
+        save_grades(user_id, results)
+
+        # LINEに結果を返答
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=formatted_text))
+
     except Exception as e:
-        reply_text = f"エラーが発生しました: {str(e)}"
-
-    # LINE に返信
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"PDF解析エラー: {e}"))
 
 
-# -------------------------
-# PDFファイル受信時
-# -------------------------
-@handler.add(MessageEvent, message=FileMessage)
-def handle_file_message(event):
-    if event.message.file_name.endswith(".pdf"):
-        # 一時ファイルに保存
-        message_content = line_bot_api.get_message_content(event.message.id)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            for chunk in message_content.iter_content():
-                tmp_file.write(chunk)
-            tmp_path = tmp_file.name
-
-        try:
-            # PDFを解析
-            result = check_pdf(tmp_path, page_no=0)
-        except Exception as e:
-            result = f"PDF解析エラー: {str(e)}"
-
-        # LINEに返信
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=result)
-        )
-    else:
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="PDFファイルを送ってください📄")
-        )
-
-
+# ========== Render 実行用 ==========
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

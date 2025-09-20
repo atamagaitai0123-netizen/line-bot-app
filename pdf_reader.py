@@ -8,7 +8,6 @@ from pathlib import Path
 
 PDF_PATH = "成績.pdf"   # PDFファイルのパス
 PAGE_NO = 0
-DEBUG = False
 
 # -------------------------
 # 卒業要件
@@ -28,16 +27,18 @@ GRAD_REQUIREMENTS = {
 SUB_REQUIREMENTS = {
     "英語（初級）": 4,
     "初習外国語": 8,
-    "外国語を用いた科目": 4   # 追加
+    "外国語を用いた科目": 4
 }
 
 YEARS_ORDER = ['25','24','23','22']
+
 
 # -------------------------
 # ヘルパー関数
 # -------------------------
 def normalize(s: str) -> str:
-    if not s: return ""
+    if not s:
+        return ""
     return re.sub(r'\s+', '', s)
 
 def extract_lines_from_page(page, line_tol=6):
@@ -100,7 +101,8 @@ def find_keyword_logical_rows(lines, keywords):
 
 def parse_nums_to_metrics(nums):
     """数値リストから必要・年度別・合計を抽出"""
-    if not nums: return {'必要': None, 'years': {}, '合計': None}
+    if not nums:
+        return {'必要': None, 'years': {}, '合計': None}
     total = int(nums[-1])
     pre = [int(x) for x in nums[:-1]]
     need = None
@@ -115,6 +117,7 @@ def parse_nums_to_metrics(nums):
         if i < len(YEARS_ORDER):
             years[YEARS_ORDER[i]] = v
     return {'必要': need, 'years': years, '合計': total}
+
 
 # -------------------------
 # メイン処理
@@ -155,13 +158,18 @@ def check_pdf(pdf_path, page_no=0):
         met=parse_nums_to_metrics(best['nums'])
         sub_results[sub]={'req':req,'got':met['合計'] or 0}
 
-    # 出力を整形
-    output = []
-    output.append("=== 各カテゴリチェック ===")
+    # -------------------------
+    # 出力作成
+    # -------------------------
+    results = {}
+    lines_out = []
+    lines_out.append("=== 各カテゴリチェック ===")
+
     for key, req in GRAD_REQUIREMENTS.items():
         sel=main_selected.get(key)
         got=sel['metrics']['合計'] if sel else None
 
+        # デフォルト判定
         if got is None:
             status="❌ データなし"
         elif got<req:
@@ -176,37 +184,41 @@ def check_pdf(pdf_path, page_no=0):
             else:
                 status="✅"
 
-        output.append(f"・{key:<20} 必要={req:<3}  取得={got if got is not None else '―'}   {status}")
+        results[key] = {"必要": req, "取得": got, "status": status}
+        lines_out.append(f"・{key:<20} 必要={req:<3}  取得={got if got is not None else '―':<3}  {status}")
 
     # 備考
-    output.append("\n=== 備考（必修科目） ===")
+    lines_out.append("\n=== 備考（必修科目） ===")
     for sub,info in sub_results.items():
         need, got = info['req'], info['got']
         if got>=need:
             status="✅"
         else:
             status=f"❌ 不足 {need-got}"
-        output.append(f"{sub:<15} 必要={need:<3}  取得={got:<3}  {status}")
+        lines_out.append(f"{sub:<15} 必要={need:<3}  取得={got:<3}  {status}")
+        results[sub] = {"必要": need, "取得": got, "status": status}
 
     # 総合判定
-    output.append("\n=== 総合判定 ===")
+    lines_out.append("\n=== 総合判定 ===")
     ok_main = all((sel and sel['metrics']['合計'] is not None and sel['metrics']['合計']>=req)
                   for key,req in GRAD_REQUIREMENTS.items() if key!="合計")
     ok_subs = all(info['got']>=info['req'] for info in sub_results.values())
     total_req=GRAD_REQUIREMENTS['合計']
     total_got=main_selected['合計']['metrics']['合計'] if main_selected['合計'] else None
 
-    if ok_main and ok_subs and total_got>=total_req:
-        output.append("🎉 卒業要件を満たしています")
+    if ok_main and ok_subs and total_got and total_got>=total_req:
+        lines_out.append("🎉 卒業要件を満たしています")
     else:
-        output.append("❌ 卒業要件を満たしていません")
+        lines_out.append("❌ 卒業要件を満たしていません")
 
-    return "\n".join(output)
+    return results, "\n".join(lines_out)
 
 
 if __name__=="__main__":
-    result = check_pdf(PDF_PATH, PAGE_NO)
-    print(result)
+    results, text = check_pdf(PDF_PATH, PAGE_NO)
+    print(text)
+
+
 
 
 
