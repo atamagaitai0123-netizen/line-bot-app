@@ -21,7 +21,7 @@ def query_huggingface(user_text):
     payload = {"inputs": user_text}
 
     response = requests.post(
-        "https://api-inference.huggingface.co/models/gpt2",
+        "https://api-inference.huggingface.co/models/distilgpt2",
         headers=headers,
         json=payload
     )
@@ -30,10 +30,13 @@ def query_huggingface(user_text):
         data = response.json()
         if isinstance(data, list) and len(data) > 0:
             return data[0].get("generated_text", "返答が生成できませんでした。")
+        elif isinstance(data, dict) and "generated_text" in data:
+            return data["generated_text"]
         else:
-            return "返答の形式が不明です。"
+            return f"予期しないレスポンス形式: {data}"
     else:
         return f"HuggingFace APIエラー: {response.status_code} - {response.text}"
+
 
 
 @app.route("/callback", methods=["POST"])
