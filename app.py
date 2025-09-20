@@ -21,7 +21,7 @@ def query_huggingface(user_text):
     payload = {"inputs": user_text}
 
     response = requests.post(
-        "https://api-inference.huggingface.co/models/gpt2",  # モデルは変更可能
+        "https://api-inference.huggingface.co/models/rinna/japanese-gpt2-medium",
         headers=headers,
         json=payload
     )
@@ -33,7 +33,7 @@ def query_huggingface(user_text):
         else:
             return "返答の形式が不明です。"
     else:
-        return f"HuggingFace APIエラー: {response.status_code}"
+        return f"HuggingFace APIエラー: {response.status_code} - {response.text}"
 
 
 @app.route("/callback", methods=["POST"])
@@ -71,5 +71,6 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
 
 
