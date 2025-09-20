@@ -2,21 +2,38 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from openai import OpenAI
 import os
+import requests
 
 app = Flask(__name__)
 
 # 環境変数からキーを取得
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+HF_API_KEY = os.environ.get("HUGGINGFACE_API_KEY")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# OpenAIクライアントを初期化
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Hugging Face API を呼び出す関数
+def query_huggingface(user_text):
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    payload = {"inputs": user_text}
+
+    response = requests.post(
+        "https://api-inference.huggingface.co/models/gpt2",  # モデルは変更可能
+        headers=headers,
+        json=payload
+    )
+
+    if response.status_code == 200:
+        data = response.json()
+        if isinstance(data, list) and len(data) > 0:
+            return data[0].get("generated_text", "返答が生成できませんでした。")
+        else:
+            return "返答の形式が不明です。"
+    else:
+        return f"HuggingFace APIエラー: {response.status_code}"
 
 
 @app.route("/callback", methods=["POST"])
@@ -41,27 +58,18 @@ def handle_message(event):
     user_text = event.message.text
 
     try:
-        # OpenAI API (v1.x 対応)
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "あなたはLINE botです。ユーザーに丁寧に答えてください。"},
-                {"role": "user", "content": user_text}
-            ],
-        )
-        reply_text = response.choices[0].message.content.strip()
+        reply_text = query_huggingface(user_text)
     except Exception as e:
         reply_text = f"エラーが発生しました: {str(e)}"
 
-    # LINE に返信
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(text=reply_text)
     )
 
 
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
 
