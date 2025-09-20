@@ -6,7 +6,7 @@ import pdfplumber
 import re
 from pathlib import Path
 
-PDF_PATH = "成績.pdf"   # PDFファイルのパス
+PDF_PATH = "成績.pdf"
 PAGE_NO = 0
 DEBUG = False
 
@@ -53,7 +53,6 @@ def normalize(s: str) -> str:
     return re.sub(r'\s+', '', s)
 
 def extract_lines_from_page(page, line_tol=6):
-    """PDFページから論理行を抽出"""
     words = page.extract_words()
     if not words:
         return []
@@ -69,7 +68,7 @@ def extract_lines_from_page(page, line_tol=6):
             text = " ".join(wd['text'] for wd in cur_words_sorted)
             nums = re.findall(r'\d+', text)
             lines.append({'text': text, 'first_x': cur_words_sorted[0]['x0'],
-                          'top': cur_top, 'nums': nums, 'words': cur_words_sorted})
+                          'top': cur_top, 'nums': nums})
             cur_top = w['top']
             cur_words = [w]
     if cur_words:
@@ -77,11 +76,10 @@ def extract_lines_from_page(page, line_tol=6):
         text = " ".join(wd['text'] for wd in cur_words_sorted)
         nums = re.findall(r'\d+', text)
         lines.append({'text': text, 'first_x': cur_words_sorted[0]['x0'],
-                      'top': cur_top, 'nums': nums, 'words': cur_words_sorted})
+                      'top': cur_top, 'nums': nums})
     return lines
 
 def parse_nums_to_metrics(nums):
-    """数値リストから必要・年度別・合計を抽出"""
     if not nums: return {'必要': None, 'years': {}, '合計': None}
     total = int(nums[-1])
     pre = [int(x) for x in nums[:-1]]
@@ -110,43 +108,38 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
         page = pdf.pages[page_no]
         lines = extract_lines_from_page(page, line_tol=6)
 
-    # キーワード探し
     keywords = list(GRAD_REQUIREMENTS.keys()) + list(SUB_REQUIREMENTS.keys()) + FREE_KEYS + ["合計","総合計"]
     logical = []
     for ln in lines:
         text = ln['text']
         for kw in keywords:
             if normalize(kw) in normalize(text):
-                logical.append({'name': kw, 'text': text, 'nums': ln['nums'], 'top': ln['top']})
+                logical.append({'keyword': kw, 'text': text, 'nums': ln['nums'], 'top': ln['top']})
     logical_sorted = sorted(logical, key=lambda r: (r['top']))
 
     # mainカテゴリ抽出
     main_selected = {}
     for key in GRAD_REQUIREMENTS.keys():
-        if key in ["合計","総合計"]:
-            # 特別扱い：合計は最後の数値
-            cand = [r for r in logical_sorted if normalize(key) in normalize(r['name']) or normalize(key) in normalize(r['text'])]
-        else:
-            cand = [r for r in logical_sorted if normalize(key) in normalize(r['name'])]
+        cand = [r for r in logical_sorted if normalize(key) in normalize(r['keyword'])]
         if not cand: continue
         best = max(cand, key=lambda c: int(c['nums'][-1]) if c['nums'] else -1)
         met = parse_nums_to_metrics(best['nums'])
         main_selected[key] = {'metrics': met}
 
-    # 自由履修 = FREE_KEYS合算
+    # 自由履修
     free_total = 0
     for fk in FREE_KEYS:
-        cands = [r for r in logical_sorted if normalize(fk) in normalize(r['name']) or normalize(fk) in normalize(r['text'])]
+        cands = [r for r in logical_sorted if normalize(fk) in normalize(r['keyword'])]
         if cands:
             best = max(cands, key=lambda c: int(c['nums'][-1]) if c['nums'] else 0)
             if best['nums']:
                 free_total += int(best['nums'][-1])
     main_selected["自由履修科目"] = {'metrics': {'必要': GRAD_REQUIREMENTS["自由履修科目"], 'years': {}, '合計': free_total}}
 
-    # subs（備考欄専用）
+    # subs
     sub_results={}
     for sub, req in SUB_REQUIREMENTS.items():
-        cands=[r for r in logical_sorted if normalize(sub)==normalize(r['name'])]
+        cands=[r for r in logical_sorted if normalize(sub) in normalize(r['keyword'])]
         if not cands:
             sub_results[sub]={'req':req,'got':0}
             continue
@@ -154,14 +147,13 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
         met = parse_nums_to_metrics(best['nums'])
         sub_results[sub]={'req':req,'got':met['合計'] or 0}
 
-    # 出力用
+    # 出力
     output = []
     output.append("成績表を解析しました！\n")
     output.append("=== 各カテゴリチェック ===")
     for key, req in GRAD_REQUIREMENTS.items():
         sel=main_selected.get(key)
         got=sel['metrics']['合計'] if sel else None
-
         if got is None:
             status="❌ データなし"
         elif got<req:
@@ -183,11 +175,11 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
         status="✅" if got>=need else f"❌ 不足 {need-got}"
         output.append(f"{sub:<15} 必要={need:<3}  取得={got:<3}  {status}")
 
-    # 不足科目算出
+    # 不足算出
     output.append("\n=== 不足している科目区分 ===")
     lacking=[]
     total_req=GRAD_REQUIREMENTS['合計']
-    total_got=main_selected['合計']['metrics']['合計'] if '合計' in main_selected else 0
+    total_got=main_selected.get('合計',{}).get('metrics',{}).get('合計',0)
     sum_lacking_known=0
     for key, req in GRAD_REQUIREMENTS.items():
         if key=="合計": continue
@@ -195,7 +187,6 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
         if got<req:
             lacking.append(f"・{key}: あと {req-got} 単位")
             sum_lacking_known += (req-got)
-    # 自由履修補正
     free_lack = (total_req-total_got) - sum_lacking_known
     if free_lack>0:
         lacking.append(f"・自由履修科目: あと {free_lack} 単位")
