@@ -15,28 +15,8 @@ HF_API_KEY = os.environ.get("HUGGINGFACE_API_KEY")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Hugging Face API を呼び出す関数 (GPT-Neo 1.3B)
-def query_huggingface(user_text):
-    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-    payload = {"inputs": user_text}
-
-    response = requests.post(
-        "https://api-inference.huggingface.co/models/distilgpt2",
-        headers=headers,
-        json=payload
-    )
-
-    if response.status_code == 200:
-        data = response.json()
-        if isinstance(data, list) and len(data) > 0:
-            return data[0].get("generated_text", "返答が生成できませんでした。")
-        elif isinstance(data, dict) and "generated_text" in data:
-            return data["generated_text"]
-        else:
-            return f"予期しないレスポンス形式: {data}"
-    else:
-        return f"HuggingFace APIエラー: {response.status_code} - {response.text}"
-
+# Hugging Face API のエンドポイント
+HF_API_URL = "https://api-inference.huggingface.co/models/facebook/blenderbot-400M-distill"
 
 
 @app.route("/callback", methods=["POST"])
@@ -55,16 +35,25 @@ def callback():
     return "OK"
 
 
-# テキストメッセージ受信時の動作
+# LINEで受け取ったテキストに応答
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text
 
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    payload = {"inputs": user_text}
+
     try:
-        reply_text = query_huggingface(user_text)
+        response = requests.post(HF_API_URL, headers=headers, json=payload)
+        if response.status_code == 200:
+            data = response.json()
+            reply_text = data[0]["generated_text"]
+        else:
+            reply_text = f"HuggingFace APIエラー: {response.status_code} - {response.text}"
     except Exception as e:
         reply_text = f"エラーが発生しました: {str(e)}"
 
+    # LINEに返信
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(text=reply_text)
@@ -74,7 +63,4 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-
-
 
