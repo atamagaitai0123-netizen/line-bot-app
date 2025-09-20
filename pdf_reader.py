@@ -126,7 +126,6 @@ def check_pdf(pdf_path, page_no=0):
 
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[page_no]
-        page_width = page.width
         lines = extract_lines_from_page(page, line_tol=6)
 
     keywords = list(GRAD_REQUIREMENTS.keys()) + list(SUB_REQUIREMENTS.keys()) + ["合計","総合計"]
@@ -156,20 +155,18 @@ def check_pdf(pdf_path, page_no=0):
         met=parse_nums_to_metrics(best['nums'])
         sub_results[sub]={'req':req,'got':met['合計'] or 0}
 
-    # 出力
-    print("\n=== 各カテゴリチェック ===")
+    # 出力を文字列でまとめる
+    output = []
+    output.append("=== 各カテゴリチェック ===")
     for key, req in GRAD_REQUIREMENTS.items():
         sel=main_selected.get(key)
         got=sel['metrics']['合計'] if sel else None
-        got_display = got if got is not None else "不明"
 
-        # デフォルト判定
         if got is None:
             status="❌ データなし"
         elif got<req:
             status=f"❌ 不足 {req-got}"
         else:
-            # 合計OKだけど備考不足があるカテゴリは 🔺
             if key=="外国語科目区分":
                 if sub_results["英語（初級）"]['got'] < sub_results["英語（初級）"]['req'] \
                    or sub_results["初習外国語"]['got'] < sub_results["初習外国語"]['req']:
@@ -179,31 +176,34 @@ def check_pdf(pdf_path, page_no=0):
             else:
                 status="✅"
 
-        print(f"{key:<20} 必要={req:<3}  取得={got_display:<3}  {status}")
+        output.append(f"{key:<20} 必要={req:<3}  取得={got if got is not None else '―':<3}  {status}")
 
-    print("\n=== 備考（必修科目） ===")
+    output.append("\n=== 備考（必修科目） ===")
     for sub,info in sub_results.items():
         need, got = info['req'], info['got']
         if got>=need:
             status="✅"
         else:
             status=f"❌ 不足 {need-got}"
-        print(f"{sub:<15} 必要={need:<3}  取得={got:<3}  {status}")
+        output.append(f"{sub:<15} 必要={need:<3}  取得={got:<3}  {status}")
 
-    print("\n=== 総合判定 ===")
+    output.append("\n=== 総合判定 ===")
     ok_main = all((sel and sel['metrics']['合計'] is not None and sel['metrics']['合計']>=req)
                   for key,req in GRAD_REQUIREMENTS.items() if key!="合計")
     ok_subs = all(info['got']>=info['req'] for info in sub_results.values())
     total_req=GRAD_REQUIREMENTS['合計']
     total_got=main_selected['合計']['metrics']['合計'] if main_selected['合計'] else None
 
-    if ok_main and ok_subs and total_got is not None and total_got>=total_req:
-        print("🎉 卒業要件を満たしています")
+    if ok_main and ok_subs and total_got>=total_req:
+        output.append("🎉 卒業要件を満たしています")
     else:
-        print("❌ 卒業要件を満たしていません")
+        output.append("❌ 卒業要件を満たしていません")
+
+    return "\n".join(output)
+
 
 if __name__=="__main__":
-    check_pdf(PDF_PATH, PAGE_NO)
+    print(check_pdf(PDF_PATH, PAGE_NO))
 
 
 
