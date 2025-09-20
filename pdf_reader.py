@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 # -------------------------
-# 卒業要件（プロジェクトと合わせること）
+# 卒業要件（必要に応じて調整）
 # -------------------------
 GRAD_REQUIREMENTS = {
     "学部必修科目区分": 12,
@@ -20,7 +20,6 @@ GRAD_REQUIREMENTS = {
     "合計": 124
 }
 
-# 備考の必修チェック対象（プロジェクトと合わせること）
 SUB_REQUIREMENTS = {
     "英語（初級）": 4,
     "初習外国語": 8,
@@ -31,14 +30,15 @@ YEARS_ORDER = ['25','24','23','22']
 
 
 # -------------------------
-# ヘルパー
+# ヘルパー関数
 # -------------------------
 def normalize(s: str) -> str:
-    if not s: return ""
+    if not s:
+        return ""
     return re.sub(r'\s+', '', s)
 
+
 def extract_lines_from_page(page, line_tol=6):
-    """PDFページから論理行を抽出"""
     words = page.extract_words()
     if not words:
         return []
@@ -65,17 +65,17 @@ def extract_lines_from_page(page, line_tol=6):
                       'top': cur_top, 'nums': nums, 'words': cur_words_sorted})
     return lines
 
+
 def find_keyword_logical_rows(lines, keywords):
-    """キーワードを含む行を抽出（簡易）"""
     logical = []
     for ln in lines:
         words = ln['words']
         n = len(words)
         for i in range(n):
-            for width in (1,2,3):
+            for width in (1, 2, 3):
                 if i + width > n:
                     continue
-                cand = "".join(words[i+j]['text'] for j in range(width))
+                cand = "".join(words[i + j]['text'] for j in range(width))
                 for kw in keywords:
                     if normalize(kw) in normalize(cand):
                         sub_words = words[i:]
@@ -87,17 +87,20 @@ def find_keyword_logical_rows(lines, keywords):
                 else:
                     continue
                 break
+    # 重複削除
     uniq = []
     seen = set()
     for r in logical:
         key = (r['top'], r['first_x'], r['name'])
         if key not in seen:
-            seen.add(key); uniq.append(r)
+            seen.add(key)
+            uniq.append(r)
     return uniq
 
+
 def parse_nums_to_metrics(nums):
-    """数値リストから必要・年度別・合計を抽出"""
-    if not nums: return {'必要': None, 'years': {}, '合計': None}
+    if not nums:
+        return {'必要': None, 'years': {}, '合計': None}
     total = int(nums[-1])
     pre = [int(x) for x in nums[:-1]] if nums[:-1] else []
     need = None
@@ -116,8 +119,8 @@ def parse_nums_to_metrics(nums):
 
 # -------------------------
 # メイン: check_pdf
-#   - return_dict=False: 整形テキスト(string) を返す（既存互換）
-#   - return_dict=True: (formatted_text, lack_dict) を返す
+# - return_dict=False -> formatted text (既存互換)
+# - return_dict=True  -> (formatted_text, lack_dict)
 # -------------------------
 def check_pdf(pdf_path, page_no=0, return_dict=False):
     p = Path(pdf_path)
@@ -128,11 +131,11 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
         page = pdf.pages[page_no]
         lines = extract_lines_from_page(page, line_tol=6)
 
-    keywords = list(GRAD_REQUIREMENTS.keys()) + list(SUB_REQUIREMENTS.keys()) + ["合計","総合計"]
+    keywords = list(GRAD_REQUIREMENTS.keys()) + list(SUB_REQUIREMENTS.keys()) + ["合計", "総合計"]
     logical = find_keyword_logical_rows(lines, keywords)
     logical_sorted = sorted(logical, key=lambda r: (r['top'], r['first_x']))
 
-    # main categories 選定
+    # main 選定
     main_selected = {}
     for key in GRAD_REQUIREMENTS.keys():
         cand = [r for r in logical_sorted if normalize(key) in normalize(r['name'])]
@@ -141,7 +144,8 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
             met = parse_nums_to_metrics(c['nums'])
             tot = met['合計'] if met['合計'] is not None else -1
             if tot > best_total:
-                best_total = tot; best = {'metrics': met}
+                best_total = tot
+                best = {'metrics': met}
         main_selected[key] = best
 
     # subs
@@ -155,25 +159,25 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
         met = parse_nums_to_metrics(best['nums'])
         sub_results[sub] = {'req': req, 'got': met['合計'] or 0}
 
-    # build results dict (取得値を取り出しやすく)
+    # parsed dict に取得値を詰める
     parsed = {}
     for key, req in GRAD_REQUIREMENTS.items():
         sel = main_selected.get(key)
         got = sel['metrics']['合計'] if (sel and sel['metrics']['合計'] is not None) else 0
         parsed[key] = got
-    # add sub items (overwrite if present)
+    # sub を上書き（存在するもの）
     for sub, info in sub_results.items():
         parsed[sub] = info['got']
 
     # -------------------------
-    # 不足計算（カテゴリごと・サブごと・自由履修を推定）
+    # 不足計算（ここで「自由履修科目」は除外して推定する）
     # -------------------------
     lack_dict = {}
     known_shortage_sum = 0
 
-    # main categories (除: 合計)
+    # main categories (ただし 自由履修科目 と 合計 は除外)
     for key, req in GRAD_REQUIREMENTS.items():
-        if key == "合計":
+        if key in ("合計", "自由履修科目"):
             continue
         got = int(parsed.get(key, 0) or 0)
         if got < req:
@@ -181,27 +185,29 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
             lack_dict[key] = lack
             known_shortage_sum += lack
 
-    # sub requirements
+    # sub requirements（必修の内訳）
     for sub, req in SUB_REQUIREMENTS.items():
         got = int(parsed.get(sub, 0) or 0)
         if got < req:
             lack = req - got
+            # サブは既知不足合計に加える（重複カウントに注意：今回は main と名前が被らない前提）
             lack_dict[sub] = lack
             known_shortage_sum += lack
 
-    # total missing (合計)
+    # 合計の不足（テーブル上の合計行を基準）
     total_req = GRAD_REQUIREMENTS.get("合計", 0)
     total_got = int(parsed.get("合計", 0) or 0)
     total_missing = max(0, total_req - total_got)
     lack_dict["合計"] = total_missing
 
-    # 自由履修の不足を推測（合計 - 既知の不足）
+    # 自由履修の不足を推定（合計不足 − 既知不足合計）
     free_missing = total_missing - known_shortage_sum
     if free_missing > 0:
         lack_dict["自由履修科目"] = free_missing
+    # else: 0 か負なら追加しない（不足なし or 他の差分で調整済）
 
     # -------------------------
-    # フォーマット済みテキストを作成（ユーザー向け出力）
+    # ユーザー向けテキストを組み立て
     # -------------------------
     lines_out = []
     lines_out.append("=== 各カテゴリチェック ===")
@@ -209,11 +215,10 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
         if key == "合計":
             continue
         got = parsed.get(key, 0)
+        got_display = "―" if got is None else str(got)
         if got is None:
-            got_display = "―"
             status = "❌ データなし"
         else:
-            got_display = str(got)
             if got < req:
                 status = f"❌ 不足 {req - got}"
             else:
@@ -227,37 +232,34 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
                     status = "✅"
         lines_out.append(f"・{key:<20} 必要={req:<3}  取得={got_display:<3}  {status}")
 
-    # 合計行
+    # 合計行（最後に）
     total_got_display = str(total_got) if total_got is not None else "―"
-    if total_got < total_req:
-        total_status = f"❌ 不足 {total_req - total_got}"
-    else:
-        total_status = "✅"
+    total_status = (f"❌ 不足 {total_req - total_got}" if total_got < total_req else "✅")
     lines_out.append(f"\n合計{'':<15} 必要={total_req:<3}  取得={total_got_display:<3}  {total_status}")
 
-    # 備考（必修科目）
+    # 備考
     lines_out.append("\n=== 備考（必修科目） ===")
-    for sub, info in SUB_REQUIREMENTS.items():
-        need = info
+    for sub, need in SUB_REQUIREMENTS.items():
         got = int(parsed.get(sub, 0) or 0)
-        if got >= need:
-            st = "✅"
-        else:
-            st = f"❌ 不足 {need - got}"
+        st = "✅" if got >= need else f"❌ 不足 {need - got}"
         lines_out.append(f"{sub:<15} 必要={need:<3}  取得={got:<3}  {st}")
 
     # 不足一覧（詳細）
     lines_out.append("\n=== 不足している科目区分 ===")
+    # main の不足（自由履修は除外されている）
     for k in GRAD_REQUIREMENTS.keys():
-        if k == "合計":
+        if k == "合計" or k == "自由履修科目":
             continue
         if k in lack_dict:
             lines_out.append(f"・{k}: あと {lack_dict[k]} 単位")
+    # sub の不足
     for subk in SUB_REQUIREMENTS.keys():
         if subk in lack_dict:
             lines_out.append(f"・{subk}: あと {lack_dict[subk]} 単位")
+    # 自由履修（推定）があれば追加
     if "自由履修科目" in lack_dict:
         lines_out.append(f"・自由履修科目: あと {lack_dict['自由履修科目']} 単位")
+    # 最後に合計
     lines_out.append(f"・合計: あと {lack_dict.get('合計', 0)} 単位")
 
     # 総合判定
@@ -280,6 +282,7 @@ if __name__ == "__main__":
     import sys
     path = sys.argv[1] if len(sys.argv) > 1 else "成績.pdf"
     print(check_pdf(path))
+
 
 
 
