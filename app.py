@@ -1,13 +1,16 @@
 import os
 import tempfile
+import pdf_reader
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
-from supabase import create_client, Client
-import pdf_reader
 
-# LINE設定
+from supabase import create_client, Client
+
+app = Flask(__name__)
+
+# LINE API設定
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -18,14 +21,10 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-app = Flask(__name__)
 
-# 最新解析結果を一時保存
-last_results = None
-
-@app.route("/callback", methods=['POST'])
+@app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
 
     try:
@@ -33,75 +32,75 @@ def callback():
     except InvalidSignatureError:
         abort(400)
 
-    return 'OK'
+    return "OK"
 
+
+# === イベント処理 ===
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file(event):
-    global last_results
+    message_content = line_bot_api.get_message_content(event.message.id)
 
-    if not event.message.file_name.endswith(".pdf"):
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="PDFファイルを送ってください📄")
-        )
-        return
-
-    # 一時ファイルに保存
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_path = tmp_file.name
-        file_content = line_bot_api.get_message_content(event.message.id)
-        for chunk in file_content.iter_content():
+        for chunk in message_content.iter_content():
             tmp_file.write(chunk)
+        tmp_file_path = tmp_file.name
 
     try:
-        results, results_dict = pdf_reader.check_pdf(tmp_path)
+        # PDF解析
+        result_text, result_dict = pdf_reader.check_pdf(tmp_file_path, return_dict=True)
 
-        # 最新結果を保持
-        last_results = results_dict
-
-        # Supabaseに保存（過去履歴も残す）
+        # Supabaseへ保存
+        file_name = os.path.basename(tmp_file_path)
         supabase.table("grades").insert({
-            "file_name": event.message.file_name,
-            "results_text": results
+            "user_id": event.source.user_id,   # ここを追加！！
+            "file_name": file_name,
+            "results_text": result_text
         }).execute()
 
+        # ユーザーへ返信
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=results)
+            TextSendMessage(text="成績表を解析しました！\n\n" + result_text)
         )
     except Exception as e:
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=f"PDF解析エラー: {str(e)}")
         )
-    finally:
-        os.remove(tmp_path)
+
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event):
-    global last_results
+    user_text = event.message.text.strip()
 
-    user_msg = event.message.text.strip()
+    try:
+        # Supabaseから最新の解析結果を取得
+        response = supabase.table("grades").select("results_text").eq("user_id", event.source.user_id).order("id", desc=True).limit(1).execute()
 
-    # PDF解析後の不足単位質問に応答
-    if last_results and ("単位" in user_msg or "足り" in user_msg):
-        reply = "=== 不足している科目区分 ===\n"
-        for k, v in last_results.items():
-            if v > 0:
-                reply += f"・{k}: あと {v} 単位\n"
-        total = sum(last_results.values())
-        reply += f"・合計: あと {total} 単位\n"
+        if response.data:
+            latest_result = response.data[0]["results_text"]
+        else:
+            latest_result = None
+
+        if "単位" in user_text or "不足" in user_text:
+            if latest_result:
+                reply_text = "直近の成績解析に基づく結果です：\n\n" + latest_result
+            else:
+                reply_text = "まだ成績表が保存されていません。PDFを送ってください。"
+        else:
+            reply_text = "こんにちは！成績や卒業要件について質問できます。PDFを送ると解析します。"
 
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=reply)
+            TextSendMessage(text=reply_text)
         )
-    else:
-        # 通常の返答
+
+    except Exception as e:
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="PDFを送っていただくと解析できます📑")
+            TextSendMessage(text=f"エラー: {str(e)}")
         )
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
