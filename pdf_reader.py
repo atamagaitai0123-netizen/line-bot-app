@@ -1,8 +1,19 @@
-import os
-from PyPDF2 import PdfReader
+# pdf_reader.py
+# 成績PDFから単位取得状況を解析して卒業要件をチェックするスクリプト
+# 必要: pip install pdfplumber pandas
 
-# 必要単位（大学規定）
-REQUIRED = {
+import pdfplumber
+import re
+from pathlib import Path
+
+PDF_PATH = "成績.pdf"   # PDFファイルのパス
+PAGE_NO = 0
+DEBUG = False
+
+# -------------------------
+# 卒業要件
+# -------------------------
+GRAD_REQUIREMENTS = {
     "学部必修科目区分": 12,
     "教養科目区分": 24,
     "外国語科目区分": 16,
@@ -10,109 +21,200 @@ REQUIRED = {
     "経営学科基礎専門科目": 14,
     "経営学科専門科目": 32,
     "自由履修科目": 24,
+    "合計": 124
 }
 
-# 自由履修にカウントする科目群
-FREE_ELECTIVE_GROUPS = [
-    "実習関連科目",
-    "ICTリテラシー科目",
-    "演習科目(演習I)",
-    "演習科目(演習IIA~IIIB)",
-    "全学共通総合講座",
-    "国際教育プログラム科目",
-    "グローバル人材育成プログラム科目",
-    "他学部科目"
-]
+# 備考の必修チェック対象
+SUB_REQUIREMENTS = {
+    "英語（初級）": 4,
+    "初習外国語": 8,
+    "外国語を用いた科目": 4
+}
 
-def parse_pdf(pdf_path, page_no=0):
-    if not os.path.exists(pdf_path):
+YEARS_ORDER = ['25','24','23','22']
+
+# -------------------------
+# ヘルパー関数
+# -------------------------
+def normalize(s: str) -> str:
+    if not s: return ""
+    return re.sub(r'\s+', '', s)
+
+def extract_lines_from_page(page, line_tol=6):
+    """PDFページから論理行を抽出"""
+    words = page.extract_words()
+    if not words:
+        return []
+    words_sorted = sorted(words, key=lambda w: (w['top'], w['x0']))
+    lines = []
+    cur_top = words_sorted[0]['top']
+    cur_words = []
+    for w in words_sorted:
+        if abs(w['top'] - cur_top) <= line_tol:
+            cur_words.append(w)
+        else:
+            cur_words_sorted = sorted(cur_words, key=lambda x: x['x0'])
+            text = " ".join(wd['text'] for wd in cur_words_sorted)
+            nums = re.findall(r'\d+', text)
+            lines.append({'text': text, 'first_x': cur_words_sorted[0]['x0'],
+                          'top': cur_top, 'nums': nums, 'words': cur_words_sorted})
+            cur_top = w['top']
+            cur_words = [w]
+    if cur_words:
+        cur_words_sorted = sorted(cur_words, key=lambda x: x['x0'])
+        text = " ".join(wd['text'] for wd in cur_words_sorted)
+        nums = re.findall(r'\d+', text)
+        lines.append({'text': text, 'first_x': cur_words_sorted[0]['x0'],
+                      'top': cur_top, 'nums': nums, 'words': cur_words_sorted})
+    return lines
+
+def find_keyword_logical_rows(lines, keywords):
+    """キーワードを含む行を抽出"""
+    logical = []
+    for ln in lines:
+        words = ln['words']
+        n = len(words)
+        for i in range(n):
+            for width in (1,2,3):
+                if i + width > n: 
+                    continue
+                cand = "".join(words[i+j]['text'] for j in range(width))
+                for kw in keywords:
+                    if normalize(kw) in normalize(cand):
+                        sub_words = words[i:]
+                        text = " ".join(w['text'] for w in sub_words)
+                        nums = re.findall(r'\d+', text)
+                        logical.append({'name': text, 'first_x': sub_words[0]['x0'],
+                                        'top': ln['top'], 'nums': nums})
+                        break
+                else:
+                    continue
+                break
+    uniq = []
+    seen = set()
+    for r in logical:
+        key = (r['top'], r['first_x'], r['name'])
+        if key not in seen:
+            seen.add(key); uniq.append(r)
+    return uniq
+
+def parse_nums_to_metrics(nums):
+    """数値リストから必要・年度別・合計を抽出"""
+    if not nums: return {'必要': None, 'years': {}, '合計': None}
+    total = int(nums[-1])
+    pre = [int(x) for x in nums[:-1]]
+    need = None
+    if len(pre) == len(YEARS_ORDER) + 1:
+        need = pre[0]; year_vals = pre[1:]
+    elif len(pre) <= len(YEARS_ORDER):
+        year_vals = pre
+    else:
+        need = pre[0]; year_vals = pre[1:]
+    years = {}
+    for i, v in enumerate(year_vals):
+        if i < len(YEARS_ORDER):
+            years[YEARS_ORDER[i]] = v
+    return {'必要': need, 'years': years, '合計': total}
+
+# -------------------------
+# メイン処理
+# -------------------------
+def check_pdf(pdf_path, page_no=0, return_dict=False):
+    """
+    return_dict=True を指定すると結果を辞書で返す
+    """
+    p = Path(pdf_path)
+    if not p.exists():
         raise FileNotFoundError(pdf_path)
 
-    reader = PdfReader(pdf_path)
-    if page_no >= len(reader.pages):
-        raise ValueError("page_no が範囲外です")
+    with pdfplumber.open(pdf_path) as pdf:
+        page = pdf.pages[page_no]
+        page_width = page.width
+        lines = extract_lines_from_page(page, line_tol=6)
 
-    text = reader.pages[page_no].extract_text()
-    if not text:
-        raise ValueError("PDFからテキストを抽出できませんでした")
-    return text
+    keywords = list(GRAD_REQUIREMENTS.keys()) + list(SUB_REQUIREMENTS.keys()) + [
+        "合計","総合計",
+        "実習関連科目","ICTリテラシー科目","演習科目","全学共通総合講座",
+        "国際教育プログラム科目","グローバル人材育成プログラム科目","他学部科目"
+    ]
+    logical = find_keyword_logical_rows(lines, keywords)
+    logical_sorted = sorted(logical, key=lambda r: (r['top'], r['first_x']))
 
-def check_pdf(pdf_path, page_no=0):
-    text = parse_pdf(pdf_path, page_no)
+    # main
+    main_selected = {}
+    for key in GRAD_REQUIREMENTS.keys():
+        cand = [r for r in logical_sorted if normalize(key) in normalize(r['name'])]
+        best=None; best_total=-1
+        for c in cand:
+            met = parse_nums_to_metrics(c['nums'])
+            tot = met['合計'] if met['合計'] is not None else -1
+            if tot > best_total:
+                best_total=tot; best={'metrics':met}
+        main_selected[key]=best
 
-    obtained = {k: 0 for k in REQUIRED.keys()}
-    remarks = {}
-    free_elective_units = 0
-
-    # 行ごとに解析
-    for line in text.splitlines():
-        parts = line.strip().split()
-        if len(parts) < 2:
+    # subs
+    sub_results={}
+    for sub, req in SUB_REQUIREMENTS.items():
+        candidates=[r for r in logical_sorted if normalize(sub) in normalize(r['name'])]
+        if not candidates:
+            sub_results[sub]={'req':req,'got':0}
             continue
+        best=max(candidates,key=lambda c:int(c['nums'][-1]) if c['nums'] else -1)
+        met=parse_nums_to_metrics(best['nums'])
+        sub_results[sub]={'req':req,'got':met['合計'] or 0}
 
-        name, unit_str = parts[0], parts[-1]
+    # 自由履修の再計算
+    free_keys=["実習関連科目","ICTリテラシー科目","演習科目","全学共通総合講座",
+               "国際教育プログラム科目","グローバル人材育成プログラム科目","他学部科目"]
+    free_total=0
+    for fk in free_keys:
+        candidates=[r for r in logical_sorted if normalize(fk) in normalize(r['name'])]
+        if not candidates: continue
+        best=max(candidates,key=lambda c:int(c['nums'][-1]) if c['nums'] else -1)
+        met=parse_nums_to_metrics(best['nums'])
+        free_total += met['合計'] or 0
+    if main_selected["自由履修科目"]:
+        main_selected["自由履修科目"]["metrics"]["合計"]=free_total
 
-        try:
-            unit_val = int(unit_str)
-        except ValueError:
-            continue
-
-        # カテゴリに合致する場合
-        for cat in REQUIRED.keys():
-            if cat in name:
-                obtained[cat] = unit_val
-
-        # 自由履修カテゴリに含まれる場合
-        for group in FREE_ELECTIVE_GROUPS:
-            if group in name:
-                free_elective_units += unit_val
-
-        # 備考用（英語・外国語系）
-        if "英語" in name or "外国語" in name:
-            remarks[name] = unit_val
-
-    # 自由履修の合計に反映
-    obtained["自由履修科目"] = free_elective_units
-
-    # 不足計算
-    shortages = {}
-    result_lines = ["成績表を解析しました！", "", "=== 各カテゴリチェック ==="]
-    total_required = 0
-    total_obtained = 0
-
-    for cat, req in REQUIRED.items():
-        need = req
-        got = obtained.get(cat, 0)
-        total_required += need
-        total_obtained += got
-
-        if got >= need:
-            mark = "✅"
+    # 結果作成
+    result_lines=[]
+    result_lines.append("成績表を解析しました！\n")
+    result_lines.append("=== 各カテゴリチェック ===")
+    for key, req in GRAD_REQUIREMENTS.items():
+        sel=main_selected.get(key)
+        got=sel['metrics']['合計'] if sel else None
+        if got is None:
+            status="❌ データなし"
+        elif got<req:
+            status=f"❌ 不足 {req-got}"
         else:
-            mark = f"❌ 不足 {need - got}"
-            shortages[cat] = need - got
+            if key=="外国語科目区分":
+                if sub_results["英語（初級）"]['got'] < sub_results["英語（初級）"]['req'] \
+                   or sub_results["初習外国語"]['got'] < sub_results["初習外国語"]['req']:
+                    status="🔺 備考不足あり"
+                else:
+                    status="✅"
+            else:
+                status="✅"
+        result_lines.append(f"・{key:<20} 必要={req:<3}  取得={got if got is not None else '―':<3}  {status}")
 
-        result_lines.append(f"・{cat:20} 必要={need}   取得={got}   {mark}")
+    result_lines.append("\n=== 備考（必修科目） ===")
+    for sub,info in sub_results.items():
+        need, got = info['req'], info['got']
+        if got>=need:
+            status="✅"
+        else:
+            status=f"❌ 不足 {need-got}"
+        result_lines.append(f"{sub:<15} 必要={need:<3}  取得={got:<3}  {status}")
 
-    result_lines.append("")
-    result_lines.append(f"合計                必要={total_required}  取得={total_obtained}   {'✅' if total_obtained>=total_required else '❌ 不足 ' + str(total_required-total_obtained)}")
-    result_lines.append("")
-    result_lines.append("=== 備考（必修科目） ===")
-    for k, v in remarks.items():
-        req = 4 if "英語（初級" in k else (8 if "初習外国語" in k else (4 if "外国語を用いた" in k else None))
-        if req:
-            mark = "✅" if v >= req else f"❌ 不足 {req - v}"
-            shortages[k] = req - v if v < req else 0
-            result_lines.append(f"{k:20} 必要={req}    取得={v}    {mark}")
+    # 辞書も返す場合
+    if return_dict:
+        return {
+            "main": main_selected,
+            "subs": sub_results,
+            "text": "\n".join(result_lines)
+        }
+    return "\n".join(result_lines)
 
-    result_lines.append("")
-    result_lines.append("=== 不足している科目区分 ===")
-    for k, v in shortages.items():
-        if v > 0:
-            result_lines.append(f"・{k}: あと {v} 単位")
-    total_short = sum([v for v in shortages.values() if v > 0])
-    result_lines.append(f"・合計: あと {total_short} 単位")
-    result_lines.append("")
-    result_lines.append("✅ 卒業要件を満たしています" if total_short == 0 else "❌ 卒業要件を満たしていません")
-
-    return "\n".join(result_lines), shortages
+if __name__=="__main__":
+    print(check_pdf(PDF_PATH, PAGE_NO))
