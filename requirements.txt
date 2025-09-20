@@ -4,6 +4,7 @@ openai
 gunicorn
 pdfplumber
 supabase
+PyPDF2
 
 
 
