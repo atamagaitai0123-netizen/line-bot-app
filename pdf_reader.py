@@ -155,7 +155,7 @@ def check_pdf(pdf_path, page_no=0):
         met=parse_nums_to_metrics(best['nums'])
         sub_results[sub]={'req':req,'got':met['合計'] or 0}
 
-    # 出力を文字列でまとめる
+    # 出力を整形
     output = []
     output.append("=== 各カテゴリチェック ===")
     for key, req in GRAD_REQUIREMENTS.items():
@@ -176,8 +176,9 @@ def check_pdf(pdf_path, page_no=0):
             else:
                 status="✅"
 
-        output.append(f"{key:<20} 必要={req:<3}  取得={got if got is not None else '―':<3}  {status}")
+        output.append(f"・{key:<20} 必要={req:<3}  取得={got if got is not None else '―'}   {status}")
 
+    # 備考
     output.append("\n=== 備考（必修科目） ===")
     for sub,info in sub_results.items():
         need, got = info['req'], info['got']
@@ -187,6 +188,7 @@ def check_pdf(pdf_path, page_no=0):
             status=f"❌ 不足 {need-got}"
         output.append(f"{sub:<15} 必要={need:<3}  取得={got:<3}  {status}")
 
+    # 総合判定
     output.append("\n=== 総合判定 ===")
     ok_main = all((sel and sel['metrics']['合計'] is not None and sel['metrics']['合計']>=req)
                   for key,req in GRAD_REQUIREMENTS.items() if key!="合計")
@@ -203,7 +205,9 @@ def check_pdf(pdf_path, page_no=0):
 
 
 if __name__=="__main__":
-    print(check_pdf(PDF_PATH, PAGE_NO))
+    result = check_pdf(PDF_PATH, PAGE_NO)
+    print(result)
+
 
 
 
