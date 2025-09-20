@@ -5,7 +5,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessa
 from openai import OpenAI
 import os
 import tempfile
-from pdf_reader import extract_text_from_pdf  # pdf_reader.py を利用
+from pdf_reader import check_pdf  # ← 追加: PDF解析関数を利用
 
 app = Flask(__name__)
 
@@ -37,7 +37,9 @@ def callback():
     return "OK"
 
 
-# テキストメッセージ受信時の動作
+# -------------------------
+# テキストメッセージ受信時
+# -------------------------
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     user_text = event.message.text
@@ -62,7 +64,9 @@ def handle_text_message(event):
     )
 
 
-# PDFファイル受信時の動作
+# -------------------------
+# PDFファイル受信時
+# -------------------------
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
     if event.message.file_name.endswith(".pdf"):
@@ -74,25 +78,15 @@ def handle_file_message(event):
             tmp_path = tmp_file.name
 
         try:
-            # PDFをテキスト化
-            pdf_text = extract_text_from_pdf(tmp_path)
-
-            # ChatGPTに渡す
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "あなたは学生の成績通知書を解析するAIです。履修科目や単位数を要約してください。"},
-                    {"role": "user", "content": pdf_text}
-                ]
-            )
-            reply_text = response.choices[0].message.content.strip()
+            # PDFを解析
+            result = check_pdf(tmp_path, page_no=0)
         except Exception as e:
-            reply_text = f"PDF処理中にエラーが発生しました: {str(e)}"
+            result = f"PDF解析エラー: {str(e)}"
 
         # LINEに返信
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=reply_text)
+            TextSendMessage(text=result)
         )
     else:
         line_bot_api.reply_message(
