@@ -21,7 +21,7 @@ def query_huggingface(user_text):
     payload = {"inputs": user_text}
 
     response = requests.post(
-        "https://api-inference.huggingface.co/models/EleutherAI/gpt-neo-1.3B",
+        "https://api-inference.huggingface.co/models/gpt2",
         headers=headers,
         json=payload
     )
