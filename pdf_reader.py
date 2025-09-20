@@ -156,12 +156,12 @@ def check_pdf(pdf_path, page_no=0):
         met=parse_nums_to_metrics(best['nums'])
         sub_results[sub]={'req':req,'got':met['合計'] or 0}
 
-    # 出力を文字列でまとめる
-    output_lines = []
-    output_lines.append("=== 各カテゴリチェック ===")
+    # 出力
+    print("\n=== 各カテゴリチェック ===")
     for key, req in GRAD_REQUIREMENTS.items():
         sel=main_selected.get(key)
         got=sel['metrics']['合計'] if sel else None
+        got_display = got if got is not None else "不明"
 
         # デフォルト判定
         if got is None:
@@ -179,34 +179,32 @@ def check_pdf(pdf_path, page_no=0):
             else:
                 status="✅"
 
-        output_lines.append(f"{key:<20} 必要={req:<3}  取得={got:<3}  {status}")
+        print(f"{key:<20} 必要={req:<3}  取得={got_display:<3}  {status}")
 
-    output_lines.append("\n=== 備考（必修科目） ===")
+    print("\n=== 備考（必修科目） ===")
     for sub,info in sub_results.items():
         need, got = info['req'], info['got']
         if got>=need:
             status="✅"
         else:
             status=f"❌ 不足 {need-got}"
-        output_lines.append(f"{sub:<15} 必要={need:<3}  取得={got:<3}  {status}")
+        print(f"{sub:<15} 必要={need:<3}  取得={got:<3}  {status}")
 
-    output_lines.append("\n=== 総合判定 ===")
+    print("\n=== 総合判定 ===")
     ok_main = all((sel and sel['metrics']['合計'] is not None and sel['metrics']['合計']>=req)
                   for key,req in GRAD_REQUIREMENTS.items() if key!="合計")
     ok_subs = all(info['got']>=info['req'] for info in sub_results.values())
     total_req=GRAD_REQUIREMENTS['合計']
     total_got=main_selected['合計']['metrics']['合計'] if main_selected['合計'] else None
 
-    if ok_main and ok_subs and total_got>=total_req:
-        output_lines.append("🎉 卒業要件を満たしています")
+    if ok_main and ok_subs and total_got is not None and total_got>=total_req:
+        print("🎉 卒業要件を満たしています")
     else:
-        output_lines.append("❌ 卒業要件を満たしていません")
+        print("❌ 卒業要件を満たしていません")
 
-    return "\n".join(output_lines)
-
-# デバッグ用
 if __name__=="__main__":
-    print(check_pdf(PDF_PATH, PAGE_NO))
+    check_pdf(PDF_PATH, PAGE_NO)
+
 
 
 
