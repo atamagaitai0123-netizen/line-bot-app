@@ -2,9 +2,7 @@ flask
 line-bot-sdk
 openai
 gunicorn
-pdfplumber
+pdfplumber  # ← PyPDF2から変更
 supabase
-PyPDF2
-
 
 
