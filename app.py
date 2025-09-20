@@ -15,13 +15,13 @@ HF_API_KEY = os.environ.get("HUGGINGFACE_API_KEY")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Hugging Face API を呼び出す関数
+# Hugging Face API を呼び出す関数 (GPT-Neo 1.3B)
 def query_huggingface(user_text):
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     payload = {"inputs": user_text}
 
     response = requests.post(
-        "https://api-inference.huggingface.co/models/rinna/japanese-gpt2-medium",
+        "https://api-inference.huggingface.co/models/EleutherAI/gpt-neo-1.3B",
         headers=headers,
         json=payload
     )
@@ -71,6 +71,7 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
