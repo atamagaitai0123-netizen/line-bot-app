@@ -25,13 +25,6 @@ openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ============ Supabase ユーティリティ ============
 def save_grades(user_id, parsed_result):
-    """
-    parsed_result = [
-      {"category": "学部必修科目区分", "required": 12, "earned": 12},
-      {"category": "教養科目区分", "required": 24, "earned": 18},
-      ...
-    ]
-    """
     rows = []
     for item in parsed_result:
         rows.append({
@@ -50,6 +43,40 @@ def get_latest_grades(user_id):
         .limit(50) \
         .execute()
     return response.data
+
+def get_curriculum(department="経営学科"):
+    response = supabase.table("curriculum") \
+        .select("*") \
+        .eq("department", department) \
+        .execute()
+    return response.data
+
+def get_curriculum_docs(department="経営学科", limit=10):
+    response = supabase.table("curriculum_docs") \
+        .select("*") \
+        .eq("department", department) \
+        .limit(limit) \
+        .execute()
+    return [r["content"] for r in response.data]
+
+# ============ 卒業要件チェック ============
+def check_graduation_status(user_id):
+    grades = get_latest_grades(user_id)
+    curriculum = get_curriculum()
+
+    results = []
+    for rule in curriculum:
+        g = next((x for x in grades if x["category"] == rule["category"]), None)
+        earned = g["earned"] if g else 0
+        required = rule["required_units"]
+        results.append({
+            "category": rule["category"],
+            "earned": earned,
+            "required": required,
+            "remaining": max(0, required - earned),
+            "notes": rule["notes"]
+        })
+    return results
 
 # ============ OpenAI ユーティリティ ============
 def ask_openai(prompt):
@@ -91,7 +118,6 @@ def handle_file(event):
     if "error" in parsed:
         reply_text = f"PDF解析エラー: {parsed['error']}"
     else:
-        # Supabase保存用に results をリスト化
         parsed_result = []
         for cat, (earned, required) in parsed["results"].items():
             parsed_result.append({
@@ -112,24 +138,34 @@ def handle_file(event):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
-    text = event.message.text
+    user_text = event.message.text
 
-    grades = get_latest_grades(user_id)
+    # 成績 + 卒業要件 + 便覧文章を取得
+    grades_status = check_graduation_status(user_id)
+    docs = get_curriculum_docs()
 
-    if grades:
-        grades_text = "\n".join(
-            [f"{g['category']}: {g['earned']}/{g['required']}" for g in grades]
-        )
-        prompt = f"""
-        以下はユーザーの最新の成績状況です:
-        {grades_text}
+    grades_text = "\n".join(
+        [f"{s['category']}: {s['earned']}/{s['required']} (残り{s['remaining']}単位)" for s in grades_status]
+    )
 
-        ユーザーの質問: {text}
-        このデータを基に答えてください。
-        """
-        answer = ask_openai(prompt)
+    # 簡潔スタイル or 詳細スタイルを切り替え
+    if "詳細" in user_text:
+        style = "詳細に説明してください。"
     else:
-        answer = "まだ成績データが登録されていません。PDFを送ってください。"
+        style = "LINE向けに絵文字を交えて要約し、各項目を1行で最大4行にまとめてください。"
+
+    prompt = f"""
+以下は大学便覧に基づく情報です:
+{docs}
+
+以下はユーザーの成績状況です:
+{grades_text}
+
+ユーザーの質問: {user_text}
+
+{style}
+"""
+    answer = ask_openai(prompt)
 
     line_bot_api.reply_message(
         event.reply_token,
