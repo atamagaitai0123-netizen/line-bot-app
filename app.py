@@ -143,21 +143,21 @@ def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text
 
-    # 成績 + 卒業要件 + 便覧文章を取得
-    grades_status = check_graduation_status(user_id)
-    docs = get_curriculum_docs()
+    # 成績や単位に関する質問かどうか判定
+    if any(keyword in user_text for keyword in ["成績", "単位", "卒業", "必修", "履修"]):
+        grades_status = check_graduation_status(user_id)
+        docs = get_curriculum_docs()
 
-    grades_text = "\n".join(
-        [f"{s['category']}: {s['earned']}/{s['required']} (残り{s['remaining']}単位)" for s in grades_status]
-    )
+        grades_text = "\n".join(
+            [f"{s['category']}: {s['earned']}/{s['required']} (残り{s['remaining']}単位)" for s in grades_status]
+        )
 
-    # 簡潔スタイル or 詳細スタイルを切り替え
-    if "詳細" in user_text:
-        style = "詳細に説明してください。"
-    else:
-        style = "LINE向けに絵文字を交えて要約し、各項目を1行で最大4行にまとめてください。"
+        if "詳細" in user_text:
+            style = "詳細に説明してください。"
+        else:
+            style = "要点を簡潔にまとめ、絵文字は2〜3個までにしてください。"
 
-    prompt = f"""
+        prompt = f"""
 以下は大学便覧に基づく情報です:
 {docs}
 
@@ -168,6 +168,15 @@ def handle_message(event):
 
 {style}
 """
+    else:
+        # 普通の会話モード
+        prompt = f"""
+ユーザーの質問: {user_text}
+
+自然な会話で簡潔に答えてください。
+絵文字は使っても1つまで。
+"""
+
     answer = ask_openai(prompt)
 
     line_bot_api.reply_message(
