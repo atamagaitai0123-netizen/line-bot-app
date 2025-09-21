@@ -67,8 +67,11 @@ def check_graduation_status(user_id):
     results = []
     for rule in curriculum:
         g = next((x for x in grades if x["category"] == rule["category"]), None)
-        earned = g["earned"] if g else 0
-        required = rule["required_units"]
+
+        # None を 0 に変換して安全に処理
+        earned = g["earned"] if g and g.get("earned") is not None else 0
+        required = rule["required_units"] if rule.get("required_units") is not None else 0
+
         results.append({
             "category": rule["category"],
             "earned": earned,
