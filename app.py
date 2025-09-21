@@ -143,6 +143,15 @@ def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text
 
+    # 楽単フォームリンクを返す条件
+    if any(keyword in user_text for keyword in ["楽単", "おすすめ授業", "取りやすい授業"]):
+        reply_text = "📋 楽単情報共有フォームはこちら！\n\n👉 https://docs.google.com/forms/d/e/1FAIpQLSfw654DpwVoSexb3lI8WLqsR6ex1lRYEX_6Yg1g-S57tw2JBQ/viewform?usp=header"
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply_text)
+        )
+        return
+
     # 成績や単位に関する質問かどうか判定
     if any(keyword in user_text for keyword in ["成績", "単位", "卒業", "必修", "履修"]):
         grades_status = check_graduation_status(user_id)
