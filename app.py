@@ -130,7 +130,13 @@ def handle_file(event):
             })
 
         save_grades(user_id, parsed_result)
-        reply_text = "PDFを受け取りました。成績データを保存しました！"
+
+        # 成績分析も返す
+        grades_status = check_graduation_status(user_id)
+        summary = "\n".join(
+            [f"{s['category']}: {s['earned']}/{s['required']} (残り{s['remaining']}単位)" for s in grades_status]
+        )
+        reply_text = f"✅ PDFを保存しました！\n\n📊 成績状況:\n{summary}"
 
     line_bot_api.reply_message(
         event.reply_token,
