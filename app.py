@@ -4,28 +4,25 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
-from supabase import create_client
-import pdf_reader
-import openai
+from supabase import create_client, Client
+from pdf_reader import parse_grades_from_pdf
 
-# ============ 初期化 ============
 app = Flask(__name__)
 
-# LINE
-line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
-handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
+# LINE設定
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Supabase
+# Supabase設定
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# OpenAI
-openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# ============ Supabase ユーティリティ ============
+# --- 成績関連 ---
 def save_grades(user_id, parsed_result):
-    # 既存データを削除して上書き保存
+    # そのユーザーの既存データを削除
     supabase.table("grades").delete().eq("user_id", user_id).execute()
 
     rows = []
@@ -36,42 +33,29 @@ def save_grades(user_id, parsed_result):
             "required": item["required"],
             "earned": item["earned"]
         })
-    supabase.table("grades").insert(rows).execute()
+    if rows:
+        supabase.table("grades").insert(rows).execute()
 
 def get_latest_grades(user_id):
-    response = supabase.table("grades") \
-        .select("*") \
-        .eq("user_id", user_id) \
-        .order("created_at", desc=True) \
-        .limit(50) \
-        .execute()
-    return response.data
+    response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
+    return response.data if response.data else []
 
-def get_curriculum(department="経営学科"):
-    response = supabase.table("curriculum") \
-        .select("*") \
-        .eq("department", department) \
-        .execute()
-    return response.data
+def get_curriculum():
+    response = supabase.table("curriculum").select("*").execute()
+    return response.data if response.data else []
 
-def get_curriculum_docs(department="経営学科", limit=10):
-    response = supabase.table("curriculum_docs") \
-        .select("*") \
-        .eq("department", department) \
-        .limit(limit) \
-        .execute()
-    return [r["content"] for r in response.data]
-
-# ============ 卒業要件チェック ============
 def check_graduation_status(user_id):
     grades = get_latest_grades(user_id)
     curriculum = get_curriculum()
 
     results = []
+    seen = set()
     for rule in curriculum:
-        g = next((x for x in grades if x["category"] == rule["category"]), None)
+        if rule["category"] in seen:
+            continue
+        seen.add(rule["category"])
 
-        # None を 0 に変換して安全に処理
+        g = next((x for x in grades if x["category"] == rule["category"]), None)
         earned = g["earned"] if g and g.get("earned") is not None else 0
         required = rule["required_units"] if rule.get("required_units") is not None else 0
 
@@ -80,133 +64,82 @@ def check_graduation_status(user_id):
             "earned": earned,
             "required": required,
             "remaining": max(0, required - earned),
-            "notes": rule["notes"]
+            "notes": rule.get("notes", "")
         })
     return results
 
-# ============ OpenAI ユーティリティ ============
-def ask_openai(prompt):
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.choices[0].message.content.strip()
+def format_graduation_status(results):
+    lines = ["📊 あなたの成績状況まとめ:"]
+    for r in results:
+        lines.append(
+            f"{r['category']}: {r['earned']}/{r['required']} "
+            f"(残り{r['remaining']}単位)"
+        )
+    return "\n".join(lines)
 
-# ============ Flask ルーティング ============
+# --- LINEイベントハンドラ ---
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
-
     return "OK"
 
-# ============ LINE ハンドラ ============
-# PDF ファイル受信
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_id = event.source.user_id
+    text = event.message.text.strip()
+
+    # 楽単フォームリンク
+    if any(k in text for k in ["楽単", "おすすめ授業", "取りやすい授業"]):
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(
+                text="📮 楽単情報はこちらから投稿してね！\nhttps://docs.google.com/forms/d/e/1FAIpQLSfw654DpwVoSexb3lI8WLqsR6ex1lRYEX_6Yg1g-S57tw2JBQ/viewform?usp=header"
+            )
+        )
+        return
+
+    # 成績確認
+    if any(k in text for k in ["成績", "卒業", "単位"]):
+        status = check_graduation_status(user_id)
+        if status:
+            reply = format_graduation_status(status)
+        else:
+            reply = "⚠️ まだ成績データが登録されていません。PDFを送ってね！"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+
+    # デフォルト応答
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❓質問をどうぞ！"))
+
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file(event):
     user_id = event.source.user_id
     message_content = line_bot_api.get_message_content(event.message.id)
 
-    # 一時ファイルに保存
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         for chunk in message_content.iter_content():
-            temp_file.write(chunk)
-        temp_file_path = temp_file.name
+            tmp_file.write(chunk)
+        tmp_path = tmp_file.name
 
-    # PDF解析 (dict形式で取得)
-    parsed = pdf_reader.check_pdf(temp_file_path, return_dict=True)
-
-    if "error" in parsed:
-        reply_text = f"PDF解析エラー: {parsed['error']}"
-    else:
-        parsed_result = []
-        for cat, (earned, required) in parsed["results"].items():
-            parsed_result.append({
-                "category": cat,
-                "required": required,
-                "earned": earned
-            })
-
+    try:
+        parsed_result = parse_grades_from_pdf(tmp_path)
         save_grades(user_id, parsed_result)
-
-        # 成績分析も返す
-        grades_status = check_graduation_status(user_id)
-        summary = "\n".join(
-            [f"{s['category']}: {s['earned']}/{s['required']} (残り{s['remaining']}単位)" for s in grades_status]
+        reply = "✅ PDFを保存しました！\n\n" + format_graduation_status(
+            check_graduation_status(user_id)
         )
-        reply_text = f"✅ PDFを保存しました！\n\n📊 成績状況:\n{summary}"
+    except Exception as e:
+        reply = f"❌ PDFの解析に失敗しました: {str(e)}"
+    finally:
+        os.remove(tmp_path)
 
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-# テキストメッセージ受信
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_id = event.source.user_id
-    user_text = event.message.text
-
-    # 楽単フォームリンクを返す条件
-    if any(keyword in user_text for keyword in ["楽単", "おすすめ授業", "取りやすい授業"]):
-        reply_text = "📋 楽単情報共有フォームはこちら！\n\n👉 https://docs.google.com/forms/d/e/1FAIpQLSfw654DpwVoSexb3lI8WLqsR6ex1lRYEX_6Yg1g-S57tw2JBQ/viewform?usp=header"
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply_text)
-        )
-        return
-
-    # 成績や単位に関する質問かどうか判定
-    if any(keyword in user_text for keyword in ["成績", "単位", "卒業", "必修", "履修"]):
-        grades_status = check_graduation_status(user_id)
-        docs = get_curriculum_docs()
-
-        grades_text = "\n".join(
-            [f"{s['category']}: {s['earned']}/{s['required']} (残り{s['remaining']}単位)" for s in grades_status]
-        )
-
-        if "詳細" in user_text:
-            style = "詳細に説明してください。"
-        else:
-            style = "要点を簡潔にまとめ、絵文字は2〜3個までにしてください。"
-
-        prompt = f"""
-以下は大学便覧に基づく情報です:
-{docs}
-
-以下はユーザーの成績状況です:
-{grades_text}
-
-ユーザーの質問: {user_text}
-
-{style}
-"""
-    else:
-        # 普通の会話モード
-        prompt = f"""
-ユーザーの質問: {user_text}
-
-自然な会話で簡潔に答えてください。
-絵文字は使っても1つまで。
-"""
-
-    answer = ask_openai(prompt)
-
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=answer)
-    )
-
-# ヘルスチェック用
-@app.route("/health")
-def health():
-    return "OK", 200
-
-# ============ メイン ============
+# --- Render用 ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
