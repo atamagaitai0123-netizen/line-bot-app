@@ -1,103 +1,146 @@
+import os
+import tempfile
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
-from supabase import create_client, Client
-from openai import OpenAI
-import os
-import tempfile
+from supabase import create_client
 import pdf_reader
+import openai
 
+# ============ 初期化 ============
 app = Flask(__name__)
 
-# 環境変数
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+# LINE
+line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
+handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-client = OpenAI(api_key=OPENAI_API_KEY)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# OpenAI
+openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# LINEのWebhook
+# ============ Supabase ユーティリティ ============
+def save_grades(user_id, parsed_result):
+    """
+    parsed_result = [
+      {"category": "学部必修科目区分", "required": 12, "earned": 12},
+      {"category": "教養科目区分", "required": 24, "earned": 18},
+      ...
+    ]
+    """
+    rows = []
+    for item in parsed_result:
+        rows.append({
+            "user_id": user_id,
+            "category": item["category"],
+            "required": item["required"],
+            "earned": item["earned"]
+        })
+    supabase.table("grades").insert(rows).execute()
+
+def get_latest_grades(user_id):
+    response = supabase.table("grades") \
+        .select("*") \
+        .eq("user_id", user_id) \
+        .order("created_at", desc=True) \
+        .limit(50) \
+        .execute()
+    return response.data
+
+# ============ OpenAI ユーティリティ ============
+def ask_openai(prompt):
+    response = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content.strip()
+
+# ============ Flask ルーティング ============
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
+
     return "OK"
 
-
-# メッセージ処理
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text(event):
-    user_id = event.source.user_id
-    user_text = event.message.text.strip()
-
-    # 「不足してる科目」などを検出
-    if any(kw in user_text for kw in ["不足", "あと何単位", "足りない"]):
-        try:
-            res = supabase.table("grades").select("results_text").eq("user_id", user_id).order("id", desc=True).limit(1).execute()
-            if res.data:
-                reply_text = res.data[0]["results_text"]
-            else:
-                reply_text = "まだ成績表が登録されていません。PDFを送ってください。"
-        except Exception as e:
-            reply_text = f"Supabase取得エラー: {str(e)}"
-
-    else:
-        # 通常会話 → OpenAI
-        try:
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "あなたは学生の履修サポートを行うアシスタントです。"},
-                    {"role": "user", "content": user_text}
-                ],
-            )
-            reply_text = response.choices[0].message.content.strip()
-        except Exception as e:
-            reply_text = f"OpenAIエラー: {str(e)}"
-
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-
-
-# PDFファイル受信時
+# ============ LINE ハンドラ ============
+# PDF ファイル受信
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file(event):
     user_id = event.source.user_id
     message_content = line_bot_api.get_message_content(event.message.id)
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+    # 一時ファイルに保存
+    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
         for chunk in message_content.iter_content():
-            tmp_file.write(chunk)
-        tmp_path = tmp_file.name
+            temp_file.write(chunk)
+        temp_file_path = temp_file.name
 
-    try:
-        # PDF解析
-        result_text = pdf_reader.check_pdf(tmp_path, page_no=0, return_dict=False)
+    # PDF解析 (dict形式で取得)
+    parsed = pdf_reader.check_pdf(temp_file_path, return_dict=True)
 
-        # Supabaseに保存
-        supabase.table("grades").insert({
-            "user_id": user_id,
-            "file_name": event.message.file_name,
-            "results_text": result_text
-        }).execute()
+    if "error" in parsed:
+        reply_text = f"PDF解析エラー: {parsed['error']}"
+    else:
+        # Supabase保存用に results をリスト化
+        parsed_result = []
+        for cat, (earned, required) in parsed["results"].items():
+            parsed_result.append({
+                "category": cat,
+                "required": required,
+                "earned": earned
+            })
 
-        reply_text = "成績表を解析しました！\n\n" + result_text
-    except Exception as e:
-        reply_text = f"PDF解析エラー: {str(e)}"
+        save_grades(user_id, parsed_result)
+        reply_text = "PDFを受け取りました。成績データを保存しました！"
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply_text)
+    )
 
+# テキストメッセージ受信
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_id = event.source.user_id
+    text = event.message.text
 
+    grades = get_latest_grades(user_id)
+
+    if grades:
+        grades_text = "\n".join(
+            [f"{g['category']}: {g['earned']}/{g['required']}" for g in grades]
+        )
+        prompt = f"""
+        以下はユーザーの最新の成績状況です:
+        {grades_text}
+
+        ユーザーの質問: {text}
+        このデータを基に答えてください。
+        """
+        answer = ask_openai(prompt)
+    else:
+        answer = "まだ成績データが登録されていません。PDFを送ってください。"
+
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=answer)
+    )
+
+# ヘルスチェック用
+@app.route("/health")
+def health():
+    return "OK", 200
+
+# ============ メイン ============
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
