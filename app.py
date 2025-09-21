@@ -25,6 +25,9 @@ openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ============ Supabase ユーティリティ ============
 def save_grades(user_id, parsed_result):
+    # 既存データを削除して上書き保存
+    supabase.table("grades").delete().eq("user_id", user_id).execute()
+
     rows = []
     for item in parsed_result:
         rows.append({
