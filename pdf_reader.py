@@ -341,7 +341,41 @@ def check_pdf(pdf_path, page_no=0, return_dict=False):
         error_msg = f"PDF解析エラー: {str(e)}"
         print(error_msg)
         return error_msg if not return_dict else {"error": error_msg}
-
+def parse_grades_from_pdf(pdf_path):
+    """
+    app.py から呼び出すためのラッパ関数。
+    テキスト形式とリスト形式の両方を返す。
+    """
+    try:
+        results, foreign_detail, total_from_summary = parse_units_advanced(pdf_path)
+        
+        # テキスト形式のレポートを生成
+        grades_text = analyze_results(results, foreign_detail, total_from_summary)
+        
+        # app.pyが期待する形式（辞書のリスト）に変換
+        grades_list = []
+        for category, (obtained, required) in results.items():
+            grades_list.append({
+                "category": category,
+                "earned": obtained,
+                "required": required
+            })
+        
+        # 外国語必修内訳も追加
+        for detail_cat, (obtained, required) in foreign_detail.items():
+            grades_list.append({
+                "category": f"外国語必修内訳_{detail_cat}",
+                "earned": obtained,
+                "required": required
+            })
+        
+        return grades_text, grades_list
+        
+    except Exception as e:
+        error_msg = f"PDF解析エラー: {str(e)}"
+        print(error_msg)
+        return error_msg, []
+    
 if __name__ == "__main__":
     import sys
     
