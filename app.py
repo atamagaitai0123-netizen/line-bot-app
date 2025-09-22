@@ -6,34 +6,25 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
 from supabase import create_client, Client
 from pdf_reader import parse_grades_from_pdf
-import openai
+from openai import OpenAI
 
-app = Flask(__name__)
-
-# 環境変数からキーを取得
+# 環境変数
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# 初期化
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-supabase: Client = None
-if SUPABASE_URL and SUPABASE_KEY:
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-openai.api_key = OPENAI_API_KEY
+app = Flask(__name__)
 
 
-def save_grades_to_supabase(user_id, grades, total_credits):
-    """Supabaseに成績データを保存"""
-    if not supabase:
-        return False
-
-    supabase.table("grades").delete().eq("user_id", user_id).execute()
-
+def save_grades_to_db(user_id, grades):
     for g in grades:
         supabase.table("grades").insert({
             "user_id": user_id,
@@ -42,53 +33,32 @@ def save_grades_to_supabase(user_id, grades, total_credits):
             "required": g["required"]
         }).execute()
 
-    supabase.table("grades").insert({
-        "user_id": user_id,
-        "category": "総取得単位",
-        "earned": total_credits,
-        "required": 124
-    }).execute()
-    return True
-
 
 def check_graduation_status(user_id):
-    """Supabaseからデータを取得し、便覧と突き合わせ"""
-    if not supabase:
-        return None
+    result = supabase.table("grades").select("*").eq("user_id", user_id).execute()
+    rows = result.data
+    if not rows:
+        return "❌ 成績データがまだ登録されていません。PDFを送ってください。"
 
-    grades_data = supabase.table("grades").select("*").eq("user_id", user_id).execute()
-    curriculum_data = supabase.table("curriculum").select("*").execute()
-
-    if not grades_data.data:
-        return None
-
-    results = []
-    for c in curriculum_data.data:
-        g = next((x for x in grades_data.data if x["category"] == c["category"]), None)
-        earned = g["earned"] if g else 0
-        required = c["required_units"]
-        results.append({
-            "category": c["category"],
-            "earned": earned,
-            "required": required,
-            "remaining": max(0, required - earned),
-            "notes": c.get("notes", "")
-        })
-    return results
+    messages = ["📊 成績状況:"]
+    for row in rows:
+        earned = row.get("earned", 0)
+        required = row.get("required", 0)
+        remaining = max(0, required - earned) if required else 0
+        messages.append(f"{row['category']}: {earned}/{required} (残り{remaining}単位)")
+    return "\n".join(messages)
 
 
-def format_graduation_status(results):
-    """卒業要件状況をフォーマット"""
-    if not results:
-        return "📊 成績データがありません。"
-    
-    lines = ["📊 あなたの成績状況まとめ:"]
-    for r in results:
-        line = f"{r['category']}: {r['earned']}/{r['required']} (残り{r['remaining']}単位)"
-        if r.get("notes"):
-            line += f"\n📝 {r['notes']}"
-        lines.append(line)
-    return "\n".join(lines)
+# 📘 Supabase 便覧検索
+def search_curriculum_info(query: str):
+    try:
+        result = supabase.table("curriculum").select("*").ilike("notes", f"%{query}%").execute()
+        if result.data:
+            info_texts = [f"- {row['category']}: {row['notes']}" for row in result.data]
+            return "\n".join(info_texts)
+    except Exception as e:
+        print(f"Supabase curriculum search error: {e}")
+    return None
 
 
 @app.route("/callback", methods=["POST"])
@@ -106,70 +76,69 @@ def callback():
 
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file(event):
-    user_id = event.source.user_id
-    message_content = line_bot_api.get_message_content(event.message.id)
+    if event.message.file_name.endswith(".pdf"):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            file_path = tmp_file.name
+            message_content = line_bot_api.get_message_content(event.message.id)
+            for chunk in message_content.iter_content():
+                tmp_file.write(chunk)
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        for chunk in message_content.iter_content():
-            tmp_file.write(chunk)
-        tmp_path = tmp_file.name
+        try:
+            grades = parse_grades_from_pdf(file_path)
+            save_grades_to_db(event.source.user_id, grades)
+            reply_text = "✅ PDFを保存しました！\n" + check_graduation_status(event.source.user_id)
+        except Exception as e:
+            reply_text = f"❌ PDFの解析に失敗しました: {e}"
 
-    try:
-        grades, total_credits = parse_grades_from_pdf(tmp_path)
-        if not grades:
-            raise ValueError("解析結果が空です")
-
-        save_grades_to_supabase(user_id, grades, total_credits)
-        reply = "✅ PDFを保存しました！\n\n" + format_graduation_status(check_graduation_status(user_id))
-    except Exception as e:
-        reply = f"❌ PDFの解析に失敗しました: {str(e)}"
-
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+    user_message = event.message.text.strip()
     user_id = event.source.user_id
-    text = event.message.text.strip()
-
-    # 楽単フォームリンク
-    if any(k in text for k in ["楽単", "おすすめ授業", "取りやすい授業"]):
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(
-                text="📮 楽単情報はこちらから投稿してね！\nhttps://docs.google.com/forms/d/e/1FAIpQLSfw654DpwVoSexb3lI8WLqsR6ex1lRYEX_6Yg1g-S57tw2JBQ/viewform?usp=header"
-            )
-        )
-        return
 
     # 成績確認
-    if any(k in text for k in ["成績", "卒業", "単位", "不足", "あと何"]):
-        if supabase:
-            status = check_graduation_status(user_id)
-            if status:
-                reply = format_graduation_status(status)
-            else:
-                reply = "⚠️ まだ成績データが登録されていません。PDFを送ってね！"
-        else:
-            reply = "⚠️ 成績データの保存機能が無効です。PDFを送ると解析結果を表示します。"
-        
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-        return
+    if "成績" in user_message or "単位" in user_message:
+        reply_text = check_graduation_status(user_id)
 
-    # 雑談や通常会話 → GPTで生成
-    try:
-        response = openai.ChatCompletion.create(
+    # 🎓 便覧検索を優先
+    elif "卒業" in user_message or "履修" in user_message or "要件" in user_message:
+        curriculum_info = search_curriculum_info(user_message)
+        if curriculum_info:
+            system_prompt = f"あなたは大学の履修相談をサポートするアシスタントです。\n以下は大学便覧から見つかった情報です:\n{curriculum_info}"
+        else:
+            system_prompt = "あなたは大学の履修相談をサポートするアシスタントです。"
+
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "あなたは大学生の友達のように自然に会話するLINE botです。短めでカジュアルに返答してください。"},
-                {"role": "user", "content": text}
-            ],
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ]
         )
-        reply = response["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        reply = f"💡 雑談の生成に失敗しました: {str(e)}"
+        reply_text = response.choices[0].message.content.strip()
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    # 💬 雑談（便覧情報も利用可能）
+    else:
+        curriculum_info = search_curriculum_info(user_message)
+        system_prompt = "あなたは学生と雑談もできる大学サポートAIです。"
+        if curriculum_info:
+            system_prompt += f"\n以下は大学便覧から見つかった情報です:\n{curriculum_info}"
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ]
+            )
+            reply_text = response.choices[0].message.content.strip()
+        except Exception as e:
+            reply_text = f"💡 雑談の生成に失敗しました: {e}"
+
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
 
 if __name__ == "__main__":
