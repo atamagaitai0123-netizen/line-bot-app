@@ -25,6 +25,7 @@ app = Flask(__name__)
 
 
 def save_grades_to_db(user_id, grades):
+    supabase.table("grades").delete().eq("user_id", user_id).execute()
     for g in grades:
         supabase.table("grades").insert({
             "user_id": user_id,
