@@ -27,7 +27,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-
 def format_grades(grades):
     """成績データを重複なしで整形"""
     if not grades:
@@ -46,10 +45,10 @@ def format_grades(grades):
 
         # 内訳はサブ出力に回す
         if "内訳" in category:
-            status = "✅ 完了" if remaining == 0 else f"残り{remaining}単位"
-            line = f"  {category.replace('外国語必修内訳_', '')} {earned}/{required} {status}"
-            if line not in output_sub:
-                output_sub.append(line)
+            if category not in seen:
+                seen.add(category)
+                status = "✅ 完了" if remaining == 0 else f"残り{remaining}単位"
+                output_sub.append(f"  {category.replace('外国語必修内訳_', '')} {earned}/{required} {status}")
             continue
 
         # 重複チェック
@@ -58,18 +57,14 @@ def format_grades(grades):
             status = "✅ 完了" if remaining == 0 else f"残り{remaining}単位"
             output_main.append(f"{category} {earned}/{required} {status}")
 
-    # 卒業要件の計算（固定値124）
-    total_required = 124
+    # 卒業要件の計算
+    total_required = 124  # 固定値
     total_earned = sum(g["earned"] for g in grades if "内訳" not in g["category"])
     grad_status = (
         f"🎓 卒業必要単位数: {total_required}\n"
         f"✅ 取得済み単位数: {total_earned}\n"
     )
-    grad_status += (
-        "🎉 おめでとうございます！卒業要件を満たしています"
-        if total_earned >= total_required
-        else "📌 まだ卒業要件を満たしていません"
-    )
+    grad_status += "🎉 おめでとうございます！卒業要件を満たしています" if total_earned >= total_required else "📌 まだ卒業要件を満たしていません"
 
     # 最終メッセージ
     result = "📊 === 単位取得状況分析結果 ===\n" + "\n".join(output_main)
@@ -98,48 +93,61 @@ def handle_text_message(event):
     user_id = event.source.user_id
     text = event.message.text.strip()
 
-    # 成績チェック
-    if text in ["成績", "単位"]:
-        response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
-        if response.data:
-            grades = response.data
-            message = format_grades(grades)
+    # 成績確認
+    if "成績" in text or "単位" in text:
+        if "アドバイス" in text:
+            # 成績アドバイス
+            response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
+            if response.data:
+                grades = response.data
+                formatted = format_grades(grades)
+                try:
+                    completion = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": "あなたは明治大学の学生をサポートするアシスタントです。"},
+                            {"role": "user", "content": f"以下の成績データに基づいてアドバイスをください:\n{formatted}"},
+                        ],
+                    )
+                    message = completion.choices[0].message.content
+                except Exception as e:
+                    message = f"💡 アドバイス生成に失敗しました: {e}"
+            else:
+                message = "❌ 成績データが見つかりません。PDFを送ってね！"
         else:
-            message = "❌ 成績データが見つかりません。PDFを送ってね！"
+            # 成績表示
+            response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
+            if response.data:
+                grades = response.data
+                message = format_grades(grades)
+            else:
+                message = "❌ 成績データが見つかりません。PDFを送ってね！"
 
-    # 成績アドバイス
-    elif "成績についてのアドバイス" in text:
-        response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
+    # 📌 事務室の連絡先
+    elif any(k in text for k in ["事務室", "事務の連絡先", "電話番号", "問い合わせ"]):
+        response = supabase.table("inquiry_contacts").select("*").execute()
         if response.data:
-            grades = response.data
-            grades_text = format_grades(grades)
-            try:
-                completion = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "あなたは明治大学の学生をサポートするアシスタントです。成績データをもとにアドバイスをしてください。",
-                        },
-                        {"role": "user", "content": f"成績データ:\n{grades_text}\nこれをもとにアドバイスをください。"},
-                    ],
-                )
-                message = completion.choices[0].message.content
-            except Exception as e:
-                message = f"💡 アドバイス生成に失敗しました: {e}"
+            contacts = "\n".join([f"{c['title']}: {c['contact']}" for c in response.data])
+            message = f"📞 事務室の連絡先情報:\n{contacts}"
         else:
-            message = "❌ 成績データがありません。まずPDFを送ってください！"
+            message = "❌ 事務室の連絡先情報が見つかりません"
 
-    # 雑談モード（OpenAI）
+    # 📌 履修条件・卒業要件
+    elif any(k in text for k in ["履修条件", "卒業要件"]):
+        response = supabase.table("curriculum_docs").select("*").execute()
+        if response.data:
+            docs = "\n".join([f"{d['title']}: {d['content']}" for d in response.data])
+            message = f"📖 履修条件・卒業要件:\n{docs}"
+        else:
+            message = "❌ 履修条件・卒業要件の情報が見つかりません"
+
     else:
+        # 雑談モード
         try:
             completion = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "あなたは明治大学の学生をサポートするアシスタントです。便覧の情報や楽単の情報も参考に答えてください。",
-                    },
+                    {"role": "system", "content": "あなたは明治大学の学生をサポートするアシスタントです。"},
                     {"role": "user", "content": text},
                 ],
             )
@@ -153,7 +161,6 @@ def handle_text_message(event):
 @handler.add(MessageEvent, message=FileMessage)
 def handle_file_message(event):
     user_id = event.source.user_id
-    file_name = event.message.file_name
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         file_path = tmp_file.name
@@ -164,10 +171,11 @@ def handle_file_message(event):
     try:
         grades = parse_grades_from_pdf(file_path)
 
-        # 既存データ削除 → 新しいデータで上書き保存
+        # 古いデータを削除して最新だけ保存
         supabase.table("grades").delete().eq("user_id", user_id).execute()
+
         for g in grades:
-            supabase.table("grades").insert(
+            supabase.table("grades").upsert(
                 {
                     "user_id": user_id,
                     "category": g["category"],
