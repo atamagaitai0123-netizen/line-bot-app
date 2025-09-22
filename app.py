@@ -6,6 +6,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
 from supabase import create_client, Client
 from pdf_reader import parse_grades_from_pdf
+import openai
 
 app = Flask(__name__)
 
@@ -14,6 +15,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -21,6 +23,8 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+openai.api_key = OPENAI_API_KEY
 
 
 def save_grades_to_supabase(user_id, grades, total_credits):
@@ -152,11 +156,20 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    # 雑談や通常会話
-    line_bot_api.reply_message(
-        event.reply_token, 
-        TextSendMessage(text=f"😊 {text} だね！何か成績や履修のことも気になる？")
-    )
+    # 雑談や通常会話 → GPTで生成
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "あなたは大学生の友達のように自然に会話するLINE botです。短めでカジュアルに返答してください。"},
+                {"role": "user", "content": text}
+            ],
+        )
+        reply = response["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        reply = f"💡 雑談の生成に失敗しました: {str(e)}"
+
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 
 if __name__ == "__main__":
