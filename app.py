@@ -5,99 +5,73 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
 from supabase import create_client, Client
-from pdf_reader import parse_grades_from_pdf, check_pdf
+from pdf_reader import parse_grades_from_pdf
 
 app = Flask(__name__)
 
-# LINE設定
+# 環境変数からキーを取得
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# Supabase設定（オプション）
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Supabaseが設定されている場合のみ初期化
-supabase = None
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- 成績関連 ---
-def save_grades(user_id, parsed_result):
-    """成績データをSupabaseに保存（Supabase設定済みの場合のみ）"""
+
+def save_grades_to_supabase(user_id, grades, total_credits):
+    """Supabaseに成績データを保存"""
     if not supabase:
         return False
-    
-    try:
-        # そのユーザーの既存データを削除
-        supabase.table("grades").delete().eq("user_id", user_id).execute()
 
-        rows = []
-        for item in parsed_result:
-            rows.append({
-                "user_id": user_id,
-                "category": item["category"],
-                "required": item["required"],
-                "earned": item["earned"]
-            })
-        if rows:
-            supabase.table("grades").insert(rows).execute()
-        return True
-    except Exception as e:
-        print(f"Supabase保存エラー: {str(e)}")
-        return False
+    supabase.table("grades").delete().eq("user_id", user_id).execute()
 
-def get_latest_grades(user_id):
-    """ユーザーの最新成績を取得"""
-    if not supabase:
-        return []
-    
-    try:
-        response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
-        return response.data if response.data else []
-    except Exception:
-        return []
+    for g in grades:
+        supabase.table("grades").insert({
+            "user_id": user_id,
+            "category": g["category"],
+            "earned": g["earned"],
+            "required": g["required"]
+        }).execute()
 
-def get_curriculum():
-    """カリキュラム情報を取得"""
-    if not supabase:
-        return []
-    
-    try:
-        response = supabase.table("curriculum").select("*").execute()
-        return response.data if response.data else []
-    except Exception:
-        return []
+    supabase.table("grades").insert({
+        "user_id": user_id,
+        "category": "総取得単位",
+        "earned": total_credits,
+        "required": 124
+    }).execute()
+    return True
+
 
 def check_graduation_status(user_id):
-    """卒業要件の確認"""
-    grades = get_latest_grades(user_id)
-    curriculum = get_curriculum()
+    """Supabaseからデータを取得し、便覧と突き合わせ"""
+    if not supabase:
+        return None
 
-    if not grades:
-        return []
+    grades_data = supabase.table("grades").select("*").eq("user_id", user_id).execute()
+    curriculum_data = supabase.table("curriculum").select("*").execute()
+
+    if not grades_data.data:
+        return None
 
     results = []
-    seen = set()
-    for rule in curriculum:
-        if rule["category"] in seen:
-            continue
-        seen.add(rule["category"])
-
-        g = next((x for x in grades if x["category"] == rule["category"]), None)
-        earned = g["earned"] if g and g.get("earned") is not None else 0
-        required = rule["required_units"] if rule.get("required_units") is not None else 0
-
+    for c in curriculum_data.data:
+        g = next((x for x in grades_data.data if x["category"] == c["category"]), None)
+        earned = g["earned"] if g else 0
+        required = c["required_units"]
         results.append({
-            "category": rule["category"],
+            "category": c["category"],
             "earned": earned,
             "required": required,
             "remaining": max(0, required - earned),
-            "notes": rule.get("notes", "")
+            "notes": c.get("notes", "")
         })
     return results
+
 
 def format_graduation_status(results):
     """卒業要件状況をフォーマット"""
@@ -106,22 +80,48 @@ def format_graduation_status(results):
     
     lines = ["📊 あなたの成績状況まとめ:"]
     for r in results:
-        lines.append(
-            f"{r['category']}: {r['earned']}/{r['required']} "
-            f"(残り{r['remaining']}単位)"
-        )
+        line = f"{r['category']}: {r['earned']}/{r['required']} (残り{r['remaining']}単位)"
+        if r.get("notes"):
+            line += f"\n📝 {r['notes']}"
+        lines.append(line)
     return "\n".join(lines)
 
-# --- LINEイベントハンドラ ---
+
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
+
     return "OK"
+
+
+@handler.add(MessageEvent, message=FileMessage)
+def handle_file(event):
+    user_id = event.source.user_id
+    message_content = line_bot_api.get_message_content(event.message.id)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        for chunk in message_content.iter_content():
+            tmp_file.write(chunk)
+        tmp_path = tmp_file.name
+
+    try:
+        grades, total_credits = parse_grades_from_pdf(tmp_path)
+        if not grades:
+            raise ValueError("解析結果が空です")
+
+        save_grades_to_supabase(user_id, grades, total_credits)
+        reply = "✅ PDFを保存しました！\n\n" + format_graduation_status(check_graduation_status(user_id))
+    except Exception as e:
+        reply = f"❌ PDFの解析に失敗しました: {str(e)}"
+
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -152,64 +152,13 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    # デフォルト応答
+    # 雑談や通常会話
     line_bot_api.reply_message(
         event.reply_token, 
-        TextSendMessage(text="❓成績表のPDFを送るか、「成績」「単位」などとメッセージしてね！")
+        TextSendMessage(text=f"😊 {text} だね！何か成績や履修のことも気になる？")
     )
 
-@handler.add(MessageEvent, message=FileMessage)
-def handle_file(event):
-    user_id = event.source.user_id
-    message_content = line_bot_api.get_message_content(event.message.id)
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        for chunk in message_content.iter_content():
-            tmp_file.write(chunk)
-        tmp_path = tmp_file.name
-
-    try:
-        # 詳細なレポートを生成
-        detailed_report = check_pdf(tmp_path)
-        
-        if "PDF解析エラー" not in detailed_report:
-            # 解析成功
-            reply = "✅ 成績表を解析しました！\n\n" + detailed_report
-            
-            # Supabase保存も試行（設定されている場合）
-            if supabase:
-                try:
-                    parsed_result = parse_grades_from_pdf(tmp_path)
-                    if parsed_result:
-                        save_success = save_grades(user_id, parsed_result)
-                        if save_success:
-                            reply += "\n\n💾 データを保存しました。次回から「成績」で確認できます。"
-                        else:
-                            reply += "\n\n⚠️ データ保存に失敗しましたが、解析結果は上記の通りです。"
-                except Exception as e:
-                    print(f"保存処理エラー: {str(e)}")
-                    # 解析結果は表示する
-        else:
-            # 解析失敗
-            reply = "❌ PDF解析に失敗しました。明治大学経営学部の成績表PDFを送ってください。"
-            
-    except Exception as e:
-        reply = f"❌ PDFの処理中にエラーが発生しました: {str(e)}"
-    finally:
-        # 一時ファイルを削除
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
-# ヘルスチェック用エンドポイント
-@app.route("/")
-def health():
-    return "LINE Bot is running!"
-
-# --- Render用 ---
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)
