@@ -36,6 +36,7 @@ EASY_KEYWORDS = ["楽単", "らくたん", "おすすめ授業", "簡単な授�
 # 便覧キーワード
 CURRICULUM_KEYWORDS = ["卒業要件", "履修条件", "進級要件", "卒業", "履修登録"]
 
+
 def format_grades(grades):
     """成績データを重複なしで整形"""
     if not grades:
@@ -77,6 +78,46 @@ def format_grades(grades):
     return result
 
 
+def answer_with_grades(user_id: str, question: str) -> str:
+    """ユーザーの質問に応じて成績データを解析して回答"""
+    response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
+    if not response.data:
+        return "❌ 成績データが見つかりません。PDFを送ってね！"
+
+    grades = {g["category"]: g for g in response.data}
+
+    # 卒業までの残り単位
+    if "あと何単位" in question or "卒業" in question:
+        total_required = sum(g["required"] for g in response.data)
+        total_earned = sum(g["earned"] for g in response.data)
+        remaining = max(0, total_required - total_earned)
+        if remaining == 0:
+            return f"🎉 おめでとうございます！すでに卒業要件を満たしています！（取得済み: {total_earned} 単位）"
+        else:
+            return f"📚 卒業までに必要な残り単位は {remaining} 単位です！（取得済み: {total_earned}/{total_required}）"
+
+    # 自由履修の確認
+    if "自由" in question:
+        g = grades.get("自由履修科目")
+        if g:
+            remaining = max(0, g["required"] - g["earned"])
+            return f"📝 自由履修は {g['earned']}/{g['required']} 単位。残り {remaining} 単位必要です！"
+
+    # 外国語必修の確認
+    if "外国語" in question:
+        subcats = [g for g in response.data if "外国語必修内訳" in g["category"]]
+        if subcats:
+            details = []
+            for g in subcats:
+                remaining = max(0, g["required"] - g["earned"])
+                status = "✅ クリア済み" if remaining == 0 else f"❌ 残り {remaining} 単位"
+                details.append(f"{g['category'].replace('外国語必修内訳_', '')}: {g['earned']}/{g['required']} {status}")
+            return "🌍 外国語必修の状況:\n" + "\n".join(details)
+
+    # デフォルト：全体表示
+    return format_grades(response.data)
+
+
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers["X-Line-Signature"]
@@ -95,14 +136,9 @@ def handle_text_message(event):
     user_id = event.source.user_id
     text = event.message.text.strip()
 
-    # 成績関連
-    if "成績" in text or "単位" in text:
-        response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
-        if response.data:
-            grades = response.data
-            message = format_grades(grades)
-        else:
-            message = "❌ 成績データが見つかりません。PDFを送ってね！"
+    # 成績関連（会話含む）
+    if any(keyword in text for keyword in ["成績", "単位", "卒業", "自由", "外国語"]):
+        message = answer_with_grades(user_id, text)
 
     # 楽単フォーム
     elif any(keyword in text for keyword in EASY_KEYWORDS):
