@@ -36,9 +36,19 @@ EASY_KEYWORDS = ["楽単", "らくたん", "おすすめ授業", "簡単な授�
 # 便覧キーワード
 CURRICULUM_KEYWORDS = ["卒業要件", "履修条件", "進級要件", "卒業", "履修登録"]
 
+# 内訳行を識別するプレフィックス
+DETAIL_PREFIX = "外国語必修内訳_"
+
+
+def is_detail_category(category: str) -> bool:
+    """内訳（詳細）カテゴリかどうか判定"""
+    if not category:
+        return False
+    return str(category).startswith(DETAIL_PREFIX)
+
 
 def format_grades(grades):
-    """成績データを重複なしで整形"""
+    """成績データを重複なしで整形（※総計は内訳を除外して算出）"""
     if not grades:
         return "❌ 成績データがありません"
 
@@ -52,18 +62,26 @@ def format_grades(grades):
         required = g.get("required", 0)
         remaining = max(0, required - earned)
 
-        if "内訳" in category:
+        # 内訳はサブ出力に回す（画面表示用）
+        if is_detail_category(category):
             status = "✅ 完了" if remaining == 0 else f"残り{remaining}単位"
-            output_sub.append(f"  {category.replace('外国語必修内訳_', '')} {earned}/{required} {status}")
+            # 表示用にプレフィックスをはずす
+            display_name = category.replace(DETAIL_PREFIX, "")
+            output_sub.append(f"  {display_name} {earned}/{required} {status}")
             continue
 
+        # 重複チェック（メインカテゴリ）
         if category not in seen:
             seen.add(category)
             status = "✅ 完了" if remaining == 0 else f"残り{remaining}単位"
             output_main.append(f"{category} {earned}/{required} {status}")
 
-    total_required = sum(g["required"] for g in grades)
-    total_earned = sum(g["earned"] for g in grades)
+    # --- ここが重要：総必要単位と総取得単位は「内訳」を除いたメイン行だけで計算する ---
+    main_entries = [g for g in grades if not is_detail_category(g.get("category"))]
+    total_required = sum(int(g.get("required", 0)) for g in main_entries)
+    total_earned = sum(int(g.get("earned", 0)) for g in main_entries)
+
+    # 卒業判定表示
     grad_status = (
         f"🎓 卒業必要単位数: {total_required}\n"
         f"✅ 取得済み単位数: {total_earned}\n"
@@ -84,12 +102,14 @@ def answer_with_grades(user_id: str, question: str) -> str:
     if not response.data:
         return "❌ 成績データが見つかりません。PDFを送ってね！"
 
-    grades = {g["category"]: g for g in response.data}
+    # response.data は複数行（各カテゴリ）なので dict を作る
+    grades_by_cat = {g["category"]: g for g in response.data}
 
-    # 卒業までの残り単位
-    if "あと何単位" in question or "卒業" in question:
-        total_required = sum(g["required"] for g in response.data)
-        total_earned = sum(g["earned"] for g in response.data)
+    # --- 卒業までの残り単位（内訳は除外） ---
+    if "あと何単位" in question or ("卒業" in question and "あと" in question) or (question.strip() == "卒業"):
+        main_entries = [g for g in response.data if not is_detail_category(g.get("category"))]
+        total_required = sum(int(g.get("required", 0)) for g in main_entries)
+        total_earned = sum(int(g.get("earned", 0)) for g in main_entries)
         remaining = max(0, total_required - total_earned)
         if remaining == 0:
             return f"🎉 おめでとうございます！すでに卒業要件を満たしています！（取得済み: {total_earned} 単位）"
@@ -98,23 +118,24 @@ def answer_with_grades(user_id: str, question: str) -> str:
 
     # 自由履修の確認
     if "自由" in question:
-        g = grades.get("自由履修科目")
+        g = grades_by_cat.get("自由履修科目")
         if g:
-            remaining = max(0, g["required"] - g["earned"])
-            return f"📝 自由履修は {g['earned']}/{g['required']} 単位。残り {remaining} 単位必要です！"
+            remaining = max(0, int(g.get("required", 0)) - int(g.get("earned", 0)))
+            return f"📝 自由履修は {g.get('earned')}/{g.get('required')} 単位。残り {remaining} 単位必要です！"
 
-    # 外国語必修の確認
+    # 外国語必修の確認（内訳行を取り出して表示）
     if "外国語" in question:
-        subcats = [g for g in response.data if "外国語必修内訳" in g["category"]]
+        subcats = [g for g in response.data if is_detail_category(g.get("category"))]
         if subcats:
             details = []
             for g in subcats:
-                remaining = max(0, g["required"] - g["earned"])
+                remaining = max(0, int(g.get("required", 0)) - int(g.get("earned", 0)))
                 status = "✅ クリア済み" if remaining == 0 else f"❌ 残り {remaining} 単位"
-                details.append(f"{g['category'].replace('外国語必修内訳_', '')}: {g['earned']}/{g['required']} {status}")
+                display_name = g["category"].replace(DETAIL_PREFIX, "")
+                details.append(f"{display_name}: {g['earned']}/{g['required']} {status}")
             return "🌍 外国語必修の状況:\n" + "\n".join(details)
 
-    # デフォルト：全体表示
+    # デフォルト：全体表示（format_grades で整形）
     return format_grades(response.data)
 
 
@@ -194,6 +215,7 @@ def handle_file_message(event):
                 }
             ).execute()
 
+        # format_grades は内部で内訳を除外して総計を計算するので安全
         message = "✅ PDFを保存しました！\n\n" + format_grades(grades)
 
     except Exception as e:
