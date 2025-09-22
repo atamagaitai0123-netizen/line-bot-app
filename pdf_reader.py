@@ -353,3 +353,34 @@ if __name__ == "__main__":
     print(f"PDFファイルを解析中: {pdf_path}")
     result = check_pdf(pdf_path)
     print(result)
+def parse_grades_from_pdf(pdf_path):
+    """
+    app.py から呼び出すためのラッパ関数。
+    app.pyが期待する形式（辞書のリスト）を返す。
+    """
+    try:
+        results, foreign_detail, total_from_summary = parse_units_advanced(pdf_path)
+        
+        # app.pyが期待する形式に変換
+        parsed_result = []
+        for category, (obtained, required) in results.items():
+            parsed_result.append({
+                "category": category,
+                "earned": obtained,
+                "required": required
+            })
+        
+        # 外国語必修内訳も追加
+        for detail_cat, (obtained, required) in foreign_detail.items():
+            parsed_result.append({
+                "category": f"外国語必修内訳_{detail_cat}",
+                "earned": obtained,
+                "required": required
+            })
+        
+        return parsed_result
+        
+    except Exception as e:
+        # エラーの場合は空のリストを返す
+        print(f"PDF解析エラー: {str(e)}")
+        return []
