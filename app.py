@@ -27,58 +27,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-
-def format_grades(grades):
-    """成績データを重複なしで整形"""
-    if not grades:
-        return "❌ 成績データがありません"
-
-    output_main = []
-    output_sub = []
-    seen = set()
-
-    # カテゴリごとに最新だけ残すための辞書
-    unique_categories = {}
-
-    for g in grades:
-        category = g.get("category")
-        earned = g.get("earned", 0)
-        required = g.get("required", 0)
-        remaining = max(0, required - earned)
-
-        if "内訳" in category:
-            # 内訳はサブに追加
-            status = "✅ 完了" if remaining == 0 else f"残り{remaining}単位"
-            output_sub.append(f"  {category.replace('外国語必修内訳_', '')} {earned}/{required} {status}")
-        else:
-            # メインカテゴリは最新の earned を記録（重複防止）
-            unique_categories[category] = (earned, required)
-
-    # メインカテゴリを整形
-    for category, (earned, required) in unique_categories.items():
-        remaining = max(0, required - earned)
-        status = "✅ 完了" if remaining == 0 else f"残り{remaining}単位"
-        output_main.append(f"{category} {earned}/{required} {status}")
-
-    # 卒業要件の計算（124単位で固定）
-    total_required = 124
-    total_earned = sum(earned for earned, _ in unique_categories.values())
-
-    grad_status = (
-        f"🎓 卒業必要単位数: {total_required}\n"
-        f"✅ 取得済み単位数: {total_earned}\n"
-    )
-    grad_status += "🎉 おめでとうございます！卒業要件を満たしています" if total_earned >= total_required else "📌 まだ卒業要件を満たしていません"
-
-    # 最終メッセージ
-    result = "📊 === 単位取得状況分析結果 ===\n" + "\n".join(output_main)
-    if output_sub:
-        result += "\n\n📋 === 備考欄（必修内訳）===\n" + "\n".join(output_sub)
-    result += "\n\n" + grad_status
-
-    return result
-
-
+# =========================
+# ハンドラー
+# =========================
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers["X-Line-Signature"]
@@ -97,27 +48,28 @@ def handle_text_message(event):
     user_id = event.source.user_id
     text = event.message.text.strip()
 
-    # 成績に関するキーワード
+    # 成績データをそのまま返す
     if "成績" in text or "単位" in text:
-        response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
+        response = supabase.table("grades_text").select("*").eq("user_id", user_id).execute()
         if response.data:
-            grades = response.data
-            message = format_grades(grades)
+            # 最新の1件だけ返す
+            latest_record = sorted(response.data, key=lambda x: x["created_at"], reverse=True)[0]
+            message = latest_record["content"]
         else:
             message = "❌ 成績データが見つかりません。PDFを送ってね！"
 
     # 成績アドバイス
-    elif "成績についてのアドバイス" in text:
-        response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
-        grades = response.data
-        if grades:
-            formatted = format_grades(grades)
+    elif any(k in text for k in ["成績についてのアドバイス", "単位についてのアドバイス", "卒業できる？", "卒業要件"]):
+        response = supabase.table("grades_text").select("*").eq("user_id", user_id).execute()
+        if response.data:
+            latest_record = sorted(response.data, key=lambda x: x["created_at"], reverse=True)[0]
+            grades_text = latest_record["content"]
             try:
                 completion = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "あなたは明治大学の学生をサポートするアシスタントです。成績データを参考にアドバイスしてください。"},
-                        {"role": "user", "content": f"以下の成績データに基づいてアドバイスしてください:\n{formatted}"},
+                        {"role": "system", "content": "あなたは明治大学の学生をサポートするアシスタントです。成績データに基づいて具体的にアドバイスしてください。"},
+                        {"role": "user", "content": f"以下の成績データに基づいてアドバイスをください:\n{grades_text}"},
                     ],
                 )
                 message = completion.choices[0].message.content
@@ -126,26 +78,25 @@ def handle_text_message(event):
         else:
             message = "❌ 成績データが見つかりません。PDFを送ってね！"
 
-    # 事務室の連絡先
+    # 事務室や便覧情報
     elif any(k in text for k in ["事務室の連絡先", "事務の連絡先", "電話番号", "経営学部の電話番号", "経営の電話番号", "経営学部の事務室の電話番号", "経営学部の問い合わせ"]):
         response = supabase.table("contacts").select("*").execute()
         if response.data:
-            rows = [f"{r['department']}: {r['contact']}" for r in response.data]
-            message = "📞 明治大学の事務室連絡先:\n" + "\n".join(rows)
+            info_list = [f"{row['title']}: {row['content']}" for row in response.data]
+            message = "\n".join(info_list)
         else:
-            message = "❌ 事務室の連絡先情報が見つかりません"
+            message = "❌ 事務室の情報が見つかりません。"
 
-    # 履修条件・卒業要件
     elif any(k in text for k in ["履修条件", "卒業要件"]):
         response = supabase.table("curriculum_docs").select("*").execute()
         if response.data:
-            rows = [f"{r['title']}: {r['content']}" for r in response.data]
-            message = "📘 履修条件・卒業要件:\n" + "\n".join(rows)
+            docs = [f"{row['title']}: {row['content']}" for row in response.data]
+            message = "\n".join(docs)
         else:
-            message = "❌ 情報が見つかりません"
+            message = "❌ 履修条件や卒業要件の情報が見つかりません。"
 
+    # 雑談
     else:
-        # 雑談
         try:
             completion = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -173,22 +124,16 @@ def handle_file_message(event):
             tmp_file.write(chunk)
 
     try:
-        grades = parse_grades_from_pdf(file_path)
+        # pdf_reader が生成した最終テキストを取得
+        grades_text = parse_grades_from_pdf(file_path)
 
-        # 古いデータを削除 → 最新のPDFデータだけ保存
-        supabase.table("grades").delete().eq("user_id", user_id).execute()
+        # Supabaseに保存（最新のみにするため古いデータは削除）
+        supabase.table("grades_text").delete().eq("user_id", user_id).execute()
+        supabase.table("grades_text").insert(
+            {"user_id": user_id, "content": grades_text}
+        ).execute()
 
-        for g in grades:
-            supabase.table("grades").upsert(
-                {
-                    "user_id": user_id,
-                    "category": g["category"],
-                    "earned": g["earned"],
-                    "required": g["required"],
-                }
-            ).execute()
-
-        message = "✅ PDFを保存しました！\n\n" + format_grades(grades)
+        message = "✅ PDFを保存しました！\n\n" + grades_text
 
     except Exception as e:
         message = f"❌ PDFの解析に失敗しました: {e}"
