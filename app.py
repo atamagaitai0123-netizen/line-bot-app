@@ -173,7 +173,8 @@ def handle_text_message(event):
         wants_advice = any(k in text for k in ["アドバイス".lower(), "助言".lower(), "advice"])
         wants_grades_check = any(k in text for k in ["成績", "単位", "成績確認"])
         asks_office = any(k in text for k in ["事務室", "連絡先", "電話番号", "電話"])
-
+        wants_easy_class = any(k in text for k in ["楽単", "ラク単", "らくたん", "easy class"])
+        
         # 学部判定（簡易）
         dept_keywords = {
             "経営": ["経営", "経営学部"],
@@ -188,6 +189,12 @@ def handle_text_message(event):
                     break
             if matched_dept:
                 break
+        # 0) 楽単フォーム
+        if wants_easy_class:
+            debug_log("handling: easy class form")
+            form_url = "https://docs.google.com/forms/d/e/1FAIpQLSfw654DpwVoSexb3lI8WLqsR6ex1lRYEX_6Yg1g-S57tw2JBQ/viewform?usp=header"
+            safe_reply(event.reply_token, f"📝 楽単情報の投稿はこちらから！\n{form_url}")
+            return
 
         # 1) アドバイス要求
         if wants_advice:
