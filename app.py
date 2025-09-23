@@ -10,6 +10,12 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessa
 from supabase import create_client, Client
 from openai import OpenAI
 import pdf_reader  # あなたが提供している pdf_reader.py を使う想定
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+JST = ZoneInfo("Asia/Tokyo")
+NOTIFY_SECRET = os.getenv("NOTIFY_SECRET", None)
+
 
 # ---- 初期化 ----
 app = Flask(__name__)
@@ -137,6 +143,39 @@ def normalize_text(s: str) -> str:
         return ""
     return s.strip().lower()
 
+def upsert_subscriber(user_id, opt_in=False):
+    payload = {"user_id": user_id, "opt_in": opt_in, "last_seen": datetime.now(tz=JST).isoformat()}
+    supabase.table("subscribers").upsert(payload).execute()
+
+def set_subscription(user_id, opt_in: bool):
+    supabase.table("subscribers").upsert({"user_id": user_id, "opt_in": opt_in, "last_seen": datetime.now(tz=JST).isoformat()}).execute()
+    return True
+
+def get_subscribed_user_ids():
+    res = supabase.table("subscribers").select("user_id").eq("opt_in", True).execute()
+    return [r['user_id'] for r in res.data] if getattr(res, "data", None) else []
+
+def fetch_events_between(start_date: date, end_date: date):
+    res = supabase.table("academic_calendar").select("*") \
+        .gte("date", start_date.isoformat()) \
+        .lte("date", end_date.isoformat()) \
+        .order("date", desc=False).execute()
+    return res.data if getattr(res, "data", None) else []
+
+def format_events_human(events):
+    if not events:
+        return "該当する予定はありません。"
+    lines = []
+    for e in events[:20]:
+        d = e.get("date")
+        t = e.get("time") or ""
+        title = e.get("title") or ""
+        cat = e.get("category") or ""
+        note = e.get("note") or ""
+        lines.append(f"- {d} {t} {title} [{cat}]\n  {note}")
+    return "\n".join(lines)
+
+
 
 # ---- ルート ----
 @app.route("/")
@@ -195,6 +234,59 @@ def handle_text_message(event):
             form_url = "https://docs.google.com/forms/d/e/1FAIpQLSfw654DpwVoSexb3lI8WLqsR6ex1lRYEX_6Yg1g-S57tw2JBQ/viewform?usp=header"
             safe_reply(event.reply_token, f"📝 楽単情報の投稿はこちらから！\n{form_url}")
             return
+        # --- 予定／カレンダー機能 ---
+        wants_calendar = any(k in text for k in ["予定", "スケジュール", "今日の予定", "明日の予定", "今月の予定", "calendar", "予定表"])
+        wants_subscribe = any(k in text for k in ["通知登録", "配信登録", "通知を受け取る", "subscribe", "登録する"])
+        wants_unsubscribe = any(k in text for k in ["通知停止", "配信停止", "unsubscribe", "停止する"])
+
+        # ユーザーを一旦DBに登録（初アクセス時）
+        upsert_subscriber(user_id, opt_in=False)
+
+        if wants_subscribe:
+            set_subscription(user_id, True)
+            safe_reply(event.reply_token, "✅ 通知登録しました！毎朝の予定をお送りします。停止は「通知停止」と送ってください。")
+            return
+
+        if wants_unsubscribe:
+            set_subscription(user_id, False)
+            safe_reply(event.reply_token, "✅ 通知を停止しました。")
+            return
+
+        if wants_calendar:
+            if "今日" in text:
+                today = datetime.now(tz=JST).date()
+                events = fetch_events_between(today, today)
+                safe_reply(event.reply_token, "📅 今日の予定:\n\n" + format_events_human(events))
+                return
+            if "明日" in text:
+                tomorrow = datetime.now(tz=JST).date() + timedelta(days=1)
+                events = fetch_events_between(tomorrow, tomorrow)
+                safe_reply(event.reply_token, "📅 明日の予定:\n\n" + format_events_human(events))
+                return
+            if "今月" in text:
+                now = datetime.now(tz=JST)
+                start = date(now.year, now.month, 1)
+                end = (date(now.year, now.month + 1, 1) - timedelta(days=1)) if now.month < 12 else date(now.year, 12, 31)
+                events = fetch_events_between(start, end)
+                safe_reply(event.reply_token, f"📅 {now.year}年{now.month}月の予定:\n\n" + format_events_human(events))
+                return
+
+            import re
+            m = re.search(r"(\d{4})[-/年](\d{1,2})", text)
+            if m:
+                y, mth = int(m.group(1)), int(m.group(2))
+                start = date(y, mth, 1)
+                end = (date(y, mth + 1, 1) - timedelta(days=1)) if mth < 12 else date(y, 12, 31)
+                events = fetch_events_between(start, end)
+                safe_reply(event.reply_token, f"📅 {y}年{mth}月の予定:\n\n" + format_events_human(events))
+                return
+
+            start = datetime.now(tz=JST).date()
+            end = start + timedelta(days=7)
+            events = fetch_events_between(start, end)
+            safe_reply(event.reply_token, "📅 直近7日間の予定:\n\n" + format_events_human(events))
+            return
+
 
         # 1) アドバイス要求
         if wants_advice:
@@ -331,6 +423,38 @@ def handle_file_message(event):
     except Exception as e:
         debug_log("handle_file_message unexpected error:", e)
         safe_reply(event.reply_token, "ファイルの処理中にエラーが発生しました。もう一度送ってください。")
+        
+@app.route("/notify", methods=["POST", "GET"])
+def notify_endpoint():
+    token = request.args.get("token") or request.headers.get("X-Notify-Token")
+    if NOTIFY_SECRET and token != NOTIFY_SECRET:
+        return ("Unauthorized", 401)
+
+    qdate = request.args.get("date")
+    try:
+        target_date = datetime.fromisoformat(qdate).date() if qdate else datetime.now(tz=JST).date()
+    except Exception:
+        return ("Bad date format", 400)
+
+    events = fetch_events_between(target_date, target_date)
+    if not events:
+        return ("no events", 200)
+
+    message_body = f"📅 {target_date.isoformat()} の予定:\n\n" + format_events_human(events)
+    user_ids = get_subscribed_user_ids()
+
+    successes, failures = 0, 0
+    for uid in user_ids:
+        try:
+            line_bot_api.push_message(uid, TextSendMessage(text=message_body))
+            successes += 1
+            supabase.table("notification_logs").insert({"user_id": uid, "event_id": None, "status": "sent"}).execute()
+        except Exception as e:
+            failures += 1
+            supabase.table("notification_logs").insert({"user_id": uid, "event_id": None, "status": "error", "error": str(e)}).execute()
+
+    return (f"sent:{successes}, failed:{failures}", 200)
+
 
 
 # ---- 起動 ----
