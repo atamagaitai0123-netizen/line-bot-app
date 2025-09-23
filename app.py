@@ -63,6 +63,7 @@ def handle_text_message(event):
         response = supabase.table("grades_text").select("*").eq("user_id", user_id).execute()
         if response.data:
             grades_text = response.data[0]["content"]
+            grades_list = response.data[0].get("raw_data", [])
             try:
                 completion = client.chat.completions.create(
                     model="gpt-4o-mini",
@@ -71,14 +72,14 @@ def handle_text_message(event):
                             "role": "system",
                             "content": (
                                 "あなたは明治大学の学生をサポートするアシスタントです。"
-                                "以下に与える成績状況は解析レポートです。"
-                                "そのまま繰り返すのではなく、内容を読み取って卒業に向けた具体的な助言をしてください。"
+                                "以下に与える成績状況（文章と数値データ）を分析して、"
+                                "卒業要件達成状況や今後の履修計画について具体的に助言してください。"
                             ),
                         },
-                        {"role": "user", "content": grades_text},
+                        {"role": "user", "content": f"成績状況:\n{grades_text}\n\nデータ:\n{grades_list}"},
                     ],
                 )
-                message = completion.choices[0].message.content  # ✅ 修正済み
+                message = completion.choices[0].message.content
             except Exception as e:
                 message = f"💡 アドバイス生成に失敗しました: {e}"
         else:
@@ -98,7 +99,7 @@ def handle_text_message(event):
                     {"role": "user", "content": text},
                 ],
             )
-            message = completion.choices[0].message.content  # ✅ 修正済み
+            message = completion.choices[0].message.content
         except Exception as e:
             message = f"💡 雑談の生成に失敗しました: {e}"
 
@@ -121,14 +122,18 @@ def handle_file_message(event):
     # PDF を解析
     grades_text, grades_list = parse_grades_from_pdf(file_path)
 
-    # Supabase に保存
+    # Supabase に保存（文章＋数値データ）
     supabase.table("grades_text").upsert(
-        {"user_id": user_id, "content": grades_text}
+        {"user_id": user_id, "content": grades_text, "raw_data": grades_list}
     ).execute()
 
     os.remove(file_path)
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 成績データを保存しました！"))
+    # ✅ 修正：保存しました＋解析結果をLINEに返信
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text="✅ 成績データを保存しました！\n\n" + grades_text)
+    )
 
 
 if __name__ == "__main__":
