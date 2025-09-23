@@ -50,7 +50,7 @@ def handle_text_message(event):
     if "成績" in text or "単位" in text:
         response = supabase.table("grades_text").select("*").eq("user_id", user_id).execute()
         if response.data:
-            message = response.data[0]["content"]  # ✅ 修正済み
+            message = response.data[0]["content"]
         else:
             message = "❌ 成績データが見つかりません。PDFを送ってね！"
 
@@ -58,16 +58,23 @@ def handle_text_message(event):
     elif "成績についてのアドバイス" in text or "単位についてのアドバイス" in text:
         response = supabase.table("grades_text").select("*").eq("user_id", user_id).execute()
         if response.data:
-            grades_text = response.data[0]["content"]  # ✅ 修正済み
+            grades_text = response.data[0]["content"]
             try:
                 completion = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "あなたは明治大学の学生をサポートするアシスタントです。成績状況に基づいて助言してください。"},
-                        {"role": "user", "content": f"以下の成績状況に基づいて、卒業に向けたアドバイスをください。\n\n{grades_text}"},
+                        {
+                            "role": "system",
+                            "content": (
+                                "あなたは明治大学の学生をサポートするアシスタントです。"
+                                "以下に与える成績状況は解析レポートです。"
+                                "そのまま繰り返すのではなく、内容を読み取って卒業に向けた具体的な助言をしてください。"
+                            ),
+                        },
+                        {"role": "user", "content": grades_text},
                     ],
                 )
-                message = completion.choices[0].message.content
+                message = completion.choices[0].message["content"]  # ✅ 修正
             except Exception as e:
                 message = f"💡 アドバイス生成に失敗しました: {e}"
         else:
@@ -103,7 +110,7 @@ def handle_text_message(event):
                     {"role": "user", "content": text},
                 ],
             )
-            message = completion.choices[0].message.content
+            message = completion.choices[0].message["content"]  # ✅ 修正
         except Exception as e:
             message = f"💡 雑談の生成に失敗しました: {e}"
 
