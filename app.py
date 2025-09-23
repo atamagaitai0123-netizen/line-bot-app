@@ -47,7 +47,7 @@ def handle_text_message(event):
     text = event.message.text.strip()
 
     if "成績" in text or "単位" in text:
-        response = supabase.table("grade_text").select("*").eq("user_id", user_id).execute()
+        response = supabase.table("grades_text").select("*").eq("user_id", user_id).execute()
         if response.data:
             message = response.data[0]["text"]
         else:
@@ -115,7 +115,7 @@ def handle_file_message(event):
             ).execute()
 
         # Supabaseに保存（grade_text）
-        supabase.table("grade_text").upsert(
+        supabase.table("grades_text").upsert(
             {"user_id": user_id, "text": grades_text}
         ).execute()
 
