@@ -344,7 +344,7 @@ def handle_text_message(event):
             return
 
 
-    　　if wants_curriculum:
+        if wants_curriculum:
               faculty, department = "経営学部", "経営学科"  # 今は固定
               rows = fetch_curriculum_docs(faculty, department)
               safe_reply(event.reply_token, format_curriculum_docs(faculty, department, rows))
