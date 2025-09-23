@@ -122,14 +122,14 @@ def handle_file_message(event):
             tmp_file.write(chunk)
 
     try:
-        # pdf_reader が文字列を返す仕様
-        grades_text = parse_grades_from_pdf(file_path)
+        # pdf_reader が (文字列, リスト) を返す仕様
+        grades_text, grades_list = parse_grades_from_pdf(file_path)
 
-        # Supabaseに保存
+        # Supabaseに保存（文字列だけ保存）
         supabase.table("grades_text").upsert(
             {
                 "user_id": user_id,
-                "content": grades_text,  # ✅ 修正済み
+                "content": grades_text,
             }
         ).execute()
 
