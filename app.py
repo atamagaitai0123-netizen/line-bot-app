@@ -201,6 +201,7 @@ def handle_text_message(event):
                 "以下に与える成績状況（文章と構造化データ）を元に、卒業要件の達成状況、"
                 "不足単位がある場合の優先度の高い履修提案、履修順序や注意点を具体的に助言してください。"
                 "数字は正確に扱ってください。"
+                "アドバイスは、要点を得ていて長文にならないようにしてください。"
             )
             user_content = f"成績レポート:\n{grades_text}\n\n構造化データ:\n{json.dumps(grades_list, ensure_ascii=False)}"
             messages = [
