@@ -46,24 +46,25 @@ def handle_text_message(event):
     user_id = event.source.user_id
     text = event.message.text.strip()
 
+    # 成績関連の問い合わせ
     if "成績" in text or "単位" in text:
         response = supabase.table("grades_text").select("*").eq("user_id", user_id).execute()
         if response.data:
-            message = response.data[0]["text"]
+            message = response.data[0]["text"]  # ✅ カラム名を text に修正
         else:
             message = "❌ 成績データが見つかりません。PDFを送ってね！"
-    elif any(keyword in text for keyword in ["成績についてのアドバイス", "単位についてのアドバイス", "卒業についてのアドバイス"]):
-        # 成績データを取得
-        grades_response = supabase.table("grades").select("*").eq("user_id", user_id).execute()
-        if grades_response.data:
-            grades = grades_response.data
-            # AIにアドバイス生成を依頼
+
+    # 成績アドバイス
+    elif "成績についてのアドバイス" in text or "単位についてのアドバイス" in text:
+        response = supabase.table("grades_text").select("*").eq("user_id", user_id).execute()
+        if response.data:
+            grades_text = response.data[0]["text"]
             try:
                 completion = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "あなたは明治大学の学生をサポートするアドバイザーです。成績状況に基づいてアドバイスしてください。"},
-                        {"role": "user", "content": f"以下は学生の成績データです。これに基づいてアドバイスをください:\n{grades}"}
+                        {"role": "system", "content": "あなたは明治大学の学生をサポートするアシスタントです。成績状況に基づいて助言してください。"},
+                        {"role": "user", "content": f"以下の成績状況に基づいて、卒業に向けたアドバイスをください。\n\n{grades_text}"},
                     ],
                 )
                 message = completion.choices[0].message.content
@@ -71,8 +72,26 @@ def handle_text_message(event):
                 message = f"💡 アドバイス生成に失敗しました: {e}"
         else:
             message = "❌ 成績データが見つかりません。PDFを送ってね！"
+
+    # 便覧関連（履修条件・卒業要件など）
+    elif "履修条件" in text or "卒業要件" in text:
+        response = supabase.table("curriculum_docs").select("*").ilike("content", f"%{text}%").execute()
+        if response.data:
+            message = response.data[0]["content"]
+        else:
+            message = "❌ 履修条件や卒業要件の情報が見つかりませんでした。"
+
+    # 事務室問い合わせ
+    elif "事務室" in text or "電話番号" in text or "問い合わせ" in text:
+        response = supabase.table("inquiry_contacts").select("*").execute()
+        if response.data:
+            contacts = [f"{row['department']}: {row['contact']}" for row in response.data]
+            message = "📞 明治大学 各学部事務室の連絡先:\n" + "\n".join(contacts)
+        else:
+            message = "❌ 事務室の連絡先情報が見つかりませんでした。"
+
+    # 雑談モード
     else:
-        # 雑談モード
         try:
             completion = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -100,23 +119,15 @@ def handle_file_message(event):
             tmp_file.write(chunk)
 
     try:
-        grades_text, grades_list = parse_grades_from_pdf(file_path)
+        # pdf_reader が文字列を返す仕様
+        grades_text = parse_grades_from_pdf(file_path)
 
-        # Supabaseに保存（grades）
-        for g in grades_list:
-            supabase.table("grades").upsert(
-                {
-                    "user_id": user_id,
-                    "category": g["category"],
-                    "earned": g["earned"],
-                    "required": g["required"],
-                    "note": g.get("note"),  # 👈 備考欄を追加
-                }
-            ).execute()
-
-        # Supabaseに保存（grade_text）
+        # Supabaseに保存
         supabase.table("grades_text").upsert(
-            {"user_id": user_id, "text": grades_text}
+            {
+                "user_id": user_id,
+                "text": grades_text,
+            }
         ).execute()
 
         message = "✅ PDFを保存しました！\n\n" + grades_text
