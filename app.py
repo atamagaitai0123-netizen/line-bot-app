@@ -196,6 +196,41 @@ def format_events_human(events):
         lines.append(f"- {d} {t} {title} [{cat}]\n  {note}")
     return "\n".join(lines)
 
+def fetch_curriculum_docs(faculty: str, department: str):
+    try:
+        res = supabase.table("curriculum_docs") \
+            .select("category_group, category, required_units") \
+            .eq("faculty", faculty) \
+            .eq("department", department) \
+            .order("category_group", desc=False) \
+            .execute()
+        return res.data if getattr(res, "data", None) else []
+    except Exception as e:
+        debug_log("fetch_curriculum_docs error:", e)
+        return []
+
+
+def format_curriculum_docs(faculty, department, rows):
+    if not rows:
+        return f"{faculty} {department} の履修条件が見つかりませんでした。"
+
+    lines = [f"📖 {faculty} {department} 卒業要件", ""]
+    current_group = None
+
+    for r in rows:
+        group = r.get("category_group") or ""
+        cat = r.get("category") or ""
+        units = r.get("required_units") or 0
+
+        # グループが変わったら見出しを追加
+        if group != current_group:
+            lines.append(f"🟦 {group}")
+            current_group = group
+
+        lines.append(f"- {cat}: {units}単位")
+
+    return "\n".join(lines)
+
 
 # ---- ルート ----
 @app.route("/")
@@ -233,7 +268,8 @@ def handle_text_message(event):
         wants_grades_check = any(k in text for k in ["成績", "単位", "成績確認"])
         asks_office = any(k in text for k in ["事務室", "連絡先", "電話番号", "電話"])
         wants_easy_class = any(k in text for k in ["楽単", "ラク単", "らくたん", "easy class"])
-        
+        wants_curriculum = any(k in text for k in ["履修条件", "卒業要件", "必要単位", "カリキュラム"])
+
         # 学部判定（簡易）
         dept_keywords = {
             "経営": ["経営", "経営学部"],
@@ -308,6 +344,14 @@ def handle_text_message(event):
             return
 
 
+    　　if wants_curriculum:
+              faculty, department = "経営学部", "経営学科"  # 今は固定
+              rows = fetch_curriculum_docs(faculty, department)
+              safe_reply(event.reply_token, format_curriculum_docs(faculty, department, rows))
+              return
+
+
+        
         # 1) アドバイス要求
         if wants_advice:
             debug_log("handling: advice")
