@@ -50,7 +50,7 @@ def handle_text_message(event):
     if "成績" in text or "単位" in text:
         response = supabase.table("grades_text").select("*").eq("user_id", user_id).execute()
         if response.data:
-            message = response.data[0]["text"]  # ✅ カラム名を text に修正
+            message = response.data[0]["content"]  # ✅ 修正済み
         else:
             message = "❌ 成績データが見つかりません。PDFを送ってね！"
 
@@ -58,7 +58,7 @@ def handle_text_message(event):
     elif "成績についてのアドバイス" in text or "単位についてのアドバイス" in text:
         response = supabase.table("grades_text").select("*").eq("user_id", user_id).execute()
         if response.data:
-            grades_text = response.data[0]["text"]
+            grades_text = response.data[0]["content"]  # ✅ 修正済み
             try:
                 completion = client.chat.completions.create(
                     model="gpt-4o-mini",
@@ -85,8 +85,11 @@ def handle_text_message(event):
     elif "事務室" in text or "電話番号" in text or "問い合わせ" in text:
         response = supabase.table("inquiry_contacts").select("*").execute()
         if response.data:
-            contacts = [f"{row['department']}: {row['contact']}" for row in response.data]
-            message = "📞 明治大学 各学部事務室の連絡先:\n" + "\n".join(contacts)
+            contacts = [
+                f"{row['department']} ({row['target']}): {row['phone']}\n{row['page_url']}"
+                for row in response.data
+            ]
+            message = "📞 明治大学 各学部事務室の連絡先:\n\n" + "\n\n".join(contacts)
         else:
             message = "❌ 事務室の連絡先情報が見つかりませんでした。"
 
@@ -126,7 +129,7 @@ def handle_file_message(event):
         supabase.table("grades_text").upsert(
             {
                 "user_id": user_id,
-                "text": grades_text,
+                "content": grades_text,  # ✅ 修正済み
             }
         ).execute()
 
