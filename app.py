@@ -165,6 +165,15 @@ def fetch_events_between(start_date: date, end_date: date):
 def format_events_human(events):
     if not events:
         return "該当する予定はありません。"
+
+    # F1/F2/S1/S2 の補足マップ
+    notes_map = {
+        "S1": "春学期前半（S1）: 4/10〜6/3",
+        "S2": "春学期後半（S2）: 6/4〜7/22",
+        "F1": "秋学期前半（F1）: 9/20〜11/14",
+        "F2": "秋学期後半（F2）: 11/15〜1/23",
+    }
+
     lines = []
     for e in events[:20]:
         d = e.get("date")
@@ -172,9 +181,19 @@ def format_events_human(events):
         title = e.get("title") or ""
         cat = e.get("category") or ""
         note = e.get("note") or ""
+
+        # 補足に変換（元の略称は削除）
+        replaced = []
+        for key, extra in notes_map.items():
+            if key in note or key in title:
+                replaced.append(extra)
+
+        # 補足が見つかったら note を置き換える
+        if replaced:
+            note = " / ".join(replaced)
+
         lines.append(f"- {d} {t} {title} [{cat}]\n  {note}")
     return "\n".join(lines)
-
 
 
 # ---- ルート ----
