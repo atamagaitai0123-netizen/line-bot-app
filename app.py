@@ -7,6 +7,7 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
+from linebot.models import FollowEvent
 from supabase import create_client, Client
 from openai import OpenAI
 import pdf_reader  # あなたが提供している pdf_reader.py を使う想定
@@ -442,7 +443,44 @@ def handle_file_message(event):
     except Exception as e:
         debug_log("handle_file_message unexpected error:", e)
         safe_reply(event.reply_token, "ファイルの処理中にエラーが発生しました。もう一度送ってください。")
-        
+
+
+@handler.add(FollowEvent)
+def handle_follow(event):
+    user_id = event.source.user_id
+    upsert_subscriber(user_id, opt_in=False)
+
+    intro_text = """🎓 ようこそ！
+Campus Navigator @明治大学経営学部 へ 👋
+
+このBotでは、学生生活に役立つ機能をまとめて使えます👇
+
+📅 学事カレンダー
+・「今日の予定」/「明日の予定」/「今月の予定」
+・「予定 2025-09」 → 指定月の予定検索
+・「通知登録」 → 毎朝その日の予定を自動通知
+・「通知停止」 → 通知をオフ
+
+📊 成績・単位管理
+・成績表PDFを送ると、自動で解析して保存
+・「成績」 → 自分の成績一覧を表示
+・「単位確認」 → 卒業に必要な単位の状況をチェック
+・「アドバイス」 → AIが履修の相談に回答
+
+📝 学生生活サポート
+・「楽単フォーム」 → 授業情報の共有フォーム
+・「事務室」 → 学部事務室の連絡先を表示
+・その他の質問や雑談にも対応（AIに相談できます）
+
+ℹ️ 注意事項
+- サーバーの状況によって、まれに応答が遅れることがあります
+- 学事予定は大学公式カレンダーを基にしています
+
+まずは「今日の予定」と送って試してみてください ✅
+"""
+
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=intro_text))
+
 @app.route("/notify", methods=["POST", "GET"])
 def notify_endpoint():
     token = request.args.get("token") or request.headers.get("X-Notify-Token")
