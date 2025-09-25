@@ -114,17 +114,17 @@ def fetch_saved_grades(user_id):
 # === シラバス検索機能 ===
 def search_syllabus_by_name(keyword: str):
     """
-    Supabase の syllabus テーブルから授業名で検索する。
-    完全一致が優先。なければ部分一致。
+    Supabase の syllabus テーブルから授業名 or 教員名を検索する。
+    subject_teacher カラムに両方入っている前提。
     """
     try:
         # 完全一致
-        res = supabase.table("syllabus").select("*").eq("subject_name", keyword).execute()
+        res = supabase.table("syllabus").select("*").eq("subject_teacher", keyword).execute()
         if res and res.data:
             return res.data
 
         # 部分一致（最大5件）
-        res = supabase.table("syllabus").select("*").ilike("subject_name", f"%{keyword}%").limit(5).execute()
+        res = supabase.table("syllabus").select("*").ilike("subject_teacher", f"%{keyword}%").limit(5).execute()
         return res.data if res and res.data else []
     except Exception as e:
         debug_log("search_syllabus_by_name error:", e)
@@ -137,20 +137,18 @@ def format_syllabus_result(rows):
 
     lines = []
     for r in rows:
-        subject = r.get("subject_name") or ""
-        teacher = r.get("teacher") or ""
+        subject_teacher = r.get("subject_teacher") or ""
         units = r.get("units") or ""
         year = r.get("grade_year") or ""
-        term = r.get("term") or ""
+        term = r.get("semester") or ""
         campus = r.get("campus") or ""
         evaluation = r.get("evaluation") or ""
 
         lines.append(
-            f"📖 {subject}\n👤 {teacher}\n単位: {units} | 年次: {year} | 学期: {term} | キャンパス: {campus}\n📝 {evaluation}"
+            f"📖 {subject_teacher}\n単位: {units} | 年次: {year} | 学期: {term} | キャンパス: {campus}\n📝 {evaluation}"
         )
 
     return "\n\n".join(lines)
-
 
 
 def json_to_human(parsed):
