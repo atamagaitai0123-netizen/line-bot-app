@@ -111,6 +111,47 @@ def fetch_saved_grades(user_id):
         debug_log("Supabase fetch error:", e)
     return None, None
 
+# === シラバス検索機能 ===
+def search_syllabus_by_name(keyword: str):
+    """
+    Supabase の syllabus テーブルから授業名で検索する。
+    完全一致が優先。なければ部分一致。
+    """
+    try:
+        # 完全一致
+        res = supabase.table("syllabus").select("*").eq("subject_name", keyword).execute()
+        if res and res.data:
+            return res.data
+
+        # 部分一致（最大5件）
+        res = supabase.table("syllabus").select("*").ilike("subject_name", f"%{keyword}%").limit(5).execute()
+        return res.data if res and res.data else []
+    except Exception as e:
+        debug_log("search_syllabus_by_name error:", e)
+        return []
+
+
+def format_syllabus_result(rows):
+    if not rows:
+        return "❌ 該当する授業が見つかりませんでした。"
+
+    lines = []
+    for r in rows:
+        subject = r.get("subject_name") or ""
+        teacher = r.get("teacher") or ""
+        units = r.get("units") or ""
+        year = r.get("grade_year") or ""
+        term = r.get("term") or ""
+        campus = r.get("campus") or ""
+        evaluation = r.get("evaluation") or ""
+
+        lines.append(
+            f"📖 {subject}\n👤 {teacher}\n単位: {units} | 年次: {year} | 学期: {term} | キャンパス: {campus}\n📝 {evaluation}"
+        )
+
+    return "\n\n".join(lines)
+
+
 
 def json_to_human(parsed):
     """raw_data(list) を簡易的に人向けのテキストに変換"""
@@ -418,7 +459,14 @@ def handle_text_message(event):
                 safe_reply(event.reply_token, "事務室情報の取得中にエラーが発生しました。後でもう一度お試しください。")
                 return
 
-        # 4) Fallback chat（雑談）
+        # 4) シラバス検索（授業名で検索）
+        syllabus_results = search_syllabus_by_name(text_raw.strip())
+        if syllabus_results:
+            safe_reply(event.reply_token, format_syllabus_result(syllabus_results))
+            return
+
+
+        # 5) Fallback chat（雑談）
         debug_log("handling: fallback chat")
         messages = [
             {"role": "system", "content": "あなたは明治大学の学生をサポートするアシスタントです。"},
