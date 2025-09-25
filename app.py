@@ -459,17 +459,15 @@ def handle_text_message(event):
                 safe_reply(event.reply_token, "事務室情報の取得中にエラーが発生しました。後でもう一度お試しください。")
                 return
 
-        # 4) シラバス検索（「シラバス」という単語が含まれていたら優先）
-        if "シラバス" in text_raw:
-            keyword = text_raw.replace("シラバス", "").replace("教えて", "").strip()
-            if keyword:
-                syllabus_results = search_syllabus_by_name(keyword)
-                if syllabus_results:
-                    safe_reply(event.reply_token, format_syllabus_result(syllabus_results))
-                    return
-            safe_reply(event.reply_token, "❌ 該当する授業が見つかりませんでした。")
-            return
+        # 4) シラバス検索
+        import re
+        keyword = re.sub(r"(シラバス|教えて)", "", text_raw).strip()
 
+        if keyword:
+            syllabus_results = search_syllabus_by_name(keyword)
+            if syllabus_results:  # ヒットしたら必ず返す
+                safe_reply(event.reply_token, format_syllabus_result(syllabus_results))
+                return
 
 
         # 5) Fallback chat（雑談）
