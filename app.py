@@ -270,6 +270,24 @@ def format_curriculum_docs(faculty, department, rows):
 
     return "\n".join(lines)
 
+# ---- プロフィール登録用 ----
+user_states = {}
+
+def save_profile(user_id, data):
+    """プロフィール情報を Supabase に保存"""
+    try:
+        supabase.table("users").upsert({
+            "line_user_id": user_id,
+            "faculty": data.get("faculty"),
+            "grade": data.get("grade"),
+            "class_group": data.get("class_group"),
+            "campus": data.get("campus"),
+            "updated_at": datetime.now(tz=JST).isoformat()
+        }).execute()
+        debug_log(f"Saved profile for {user_id}: {data}")
+    except Exception as e:
+        debug_log("save_profile error:", e)
+
 
 # ---- ルート ----
 @app.route("/")
@@ -303,6 +321,68 @@ def handle_text_message(event):
         debug_log(f"TextMessage from {user_id}: {text_raw}")
         text = normalize_text(text_raw)
 
+                # --- リッチメニュー専用の応答 ---
+        if text_raw == "使い方ガイド":
+            guide_text = (
+                "Campus Navigatorの使い方📖\n\n"
+                "1️⃣ 成績表をアップロード → 自動解析\n"
+                "2️⃣ シラバス検索 → 授業内容や条件を確認\n"
+                "3️⃣ 年間予定 → 行事をリマインド通知\n\n"
+                "メニューからいつでも選べます！"
+            )
+            safe_reply(event.reply_token, guide_text)
+            return
+
+        if text_raw == "年間行事予定":
+            urls = [
+                "https://zqihsfkgjaenzndopzpk.supabase.co/storage/v1/object/public/calendar/annual_schedule_1.png",
+                "https://zqihsfkgjaenzndopzpk.supabase.co/storage/v1/object/public/calendar/annual_schedule_2.png",
+            ]
+            messages = [
+                ImageSendMessage(
+                    original_content_url=url,
+                    preview_image_url=url
+                )
+                for url in urls
+            ]
+            line_bot_api.reply_message(event.reply_token, messages)
+            return
+
+        if text_raw == "プロフィール登録":
+            user_states[user_id] = {"step": 1, "data": {}}
+            safe_reply(event.reply_token, "学部を入力してください（例：経営学部）")
+            return
+
+        if user_id in user_states:
+            state = user_states[user_id]
+            step = state["step"]
+
+            if step == 1:
+                state["data"]["faculty"] = text_raw
+                state["step"] = 2
+                safe_reply(event.reply_token, "学年を入力してください（例：2）")
+                return
+
+            elif step == 2:
+                state["data"]["grade"] = text_raw
+                state["step"] = 3
+                safe_reply(event.reply_token, "組を入力してください（例：A組、スキップなら空欄）")
+                return
+
+            elif step == 3:
+                state["data"]["class_group"] = text_raw
+                state["step"] = 4
+                safe_reply(event.reply_token, "キャンパスを入力してください（和泉 or 駿河台）")
+                return
+
+            elif step == 4:
+                state["data"]["campus"] = text_raw
+                save_profile(user_id, state["data"])
+                del user_states[user_id]
+                safe_reply(event.reply_token, "✅ プロフィールを登録しました！来年度は再登録をお願いします。")
+                return
+
+
         wants_advice = any(k in text for k in ["アドバイス".lower(), "助言".lower(), "advice"])
         wants_grades_check = any(k in text for k in ["成績", "単位", "成績確認"])
         asks_office = any(k in text for k in ["事務室", "連絡先", "電話番号", "電話"])
@@ -329,6 +409,7 @@ def handle_text_message(event):
             form_url = "https://docs.google.com/forms/d/e/1FAIpQLSfw654DpwVoSexb3lI8WLqsR6ex1lRYEX_6Yg1g-S57tw2JBQ/viewform?usp=header"
             safe_reply(event.reply_token, f"📝 楽単情報の投稿はこちらから！\n{form_url}")
             return
+
         # --- 予定／カレンダー機能 ---
         wants_calendar = any(k in text for k in ["予定", "スケジュール", "今日の予定", "明日の予定", "今月の予定", "calendar", "予定表"])
         wants_subscribe = any(k in text for k in ["通知登録", "配信登録", "通知を受け取る", "subscribe", "登録する"])
