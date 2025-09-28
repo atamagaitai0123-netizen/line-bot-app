@@ -914,21 +914,48 @@ def class_notify():
 
     return (f"notified:{len(matches)}", 200)
 
-@app.route("/risk_notify", methods=["POST", "GET"])
+@app.route("/risk_notify", methods=["GET"])
 def risk_notify():
-    token = request.args.get("token") or request.headers.get("X-Notify-Token")
+    token = request.args.get("token")
     if NOTIFY_SECRET and token != NOTIFY_SECRET:
         return ("Unauthorized", 401)
 
-    user_ids = get_subscribed_user_ids()
-    count = 0
+    # attendanceに記録がある全ユーザーを対象
+    res = supabase.table("attendance").select("user_id").execute()
+    user_ids = list({row["user_id"] for row in res.data})  # 重複排除
+
+    # 各ユーザーごとにリスク判定
     for uid in user_ids:
-        report = get_attendance_risk_report(uid)
-        # 危険な授業があるユーザーにだけ送信
-        if "⚠️" in report or "危険" in report:
-            line_bot_api.push_message(uid, TextSendMessage(text=report))
-            count += 1
-    return (f"sent:{count}", 200)
+        risks = []
+        subjects_res = supabase.table("attendance") \
+            .select("subject, status") \
+            .eq("user_id", uid) \
+            .execute()
+
+        # 授業ごとに集計
+        subject_stats = {}
+        for row in subjects_res.data:
+            subject = row["subject"]
+            status = row["status"]
+            if subject not in subject_stats:
+                subject_stats[subject] = {"absent": 0, "late": 0}
+            if status == "absent":
+                subject_stats[subject]["absent"] += 1
+            elif status == "late":
+                subject_stats[subject]["late"] += 1
+
+        # リスク判定: 欠席2回 + 遅刻1回以上
+        for subject, counts in subject_stats.items():
+            if counts["absent"] >= 2 and counts["late"] >= 1:
+                risks.append(f"{subject}（欠席{counts['absent']}回・遅刻{counts['late']}回）")
+
+        # 警告メッセージ送信
+        if risks:
+            message = "⚠️ 危険な授業があります！\n" + "\n".join(risks)
+            line_bot_api.push_message(uid, TextSendMessage(text=message))
+
+    return ("done", 200)
+
 
 
 @handler.add(PostbackEvent)
