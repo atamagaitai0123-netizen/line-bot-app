@@ -812,7 +812,7 @@ def notify_endpoint():
             supabase.table("notification_logs").insert({"user_id": uid, "event_id": None, "status": "error", "error": str(e)}).execute()
 
     return (f"sent:{successes}, failed:{failures}", 200)
-    
+
 @app.route("/class_notify", methods=["POST", "GET"])
 def class_notify():
     # セキュリティトークンの確認（/notify と同じ仕組み）
@@ -821,13 +821,16 @@ def class_notify():
         return ("Unauthorized", 401)
 
     # 現在時刻を取得（例: "10:40"）
-    now = datetime.now(tz=JST).strftime("%H:%M")
-    weekday = ["月","火","水","木","金","土","日"][datetime.now(tz=JST).weekday()]
+    now = datetime.now(tz=JST)
+    weekday = ["月","火","水","木","金","土","日"][now.weekday()]
 
     matches = []
     for period, times in PERIOD_TIMES.items():
-        if now == times["end"]:  # 授業終了時刻に一致
-            # Supabaseから「その曜日・その時限の授業」を探す
+        end_time = datetime.strptime(times["end"], "%H:%M").replace(
+        year=now.year, month=now.month, day=now.day, tzinfo=JST
+        )
+        # 授業終了時刻から ±5分以内なら通知
+        if abs((now - end_time).total_seconds()) <= 300:
             res = supabase.table("user_classes") \
                 .select("*") \
                 .eq("day_of_week", weekday) \
@@ -835,6 +838,7 @@ def class_notify():
                 .execute()
             if res and res.data:
                 matches.extend(res.data)
+
 
     # 出欠ボタンを送信
     for row in matches:
