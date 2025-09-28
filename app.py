@@ -10,15 +10,27 @@ from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, FileMessage,
     FollowEvent, QuickReply, QuickReplyButton, MessageAction  # ★ 追加
 )
+from linebot.models import PostbackEvent
 from supabase import create_client, Client
 from openai import OpenAI
 import pdf_reader  # あなたが提供している pdf_reader.py を使う想定
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+from linebot.models import TemplateSendMessage, ButtonsTemplate, PostbackAction
 
 
 JST = ZoneInfo("Asia/Tokyo")
 NOTIFY_SECRET = os.getenv("NOTIFY_SECRET", None)
+# 明治大学 共通時間割（開始・終了時刻）
+PERIOD_TIMES = {
+    1: {"start": "09:00", "end": "10:40"},
+    2: {"start": "10:50", "end": "12:30"},
+    3: {"start": "13:30", "end": "15:10"},
+    4: {"start": "15:20", "end": "17:00"},
+    5: {"start": "17:10", "end": "18:50"},
+    6: {"start": "19:00", "end": "20:40"},
+}
+
 
 
 # ---- 初期化 ----
@@ -51,6 +63,40 @@ def safe_reply(reply_token, text):
         debug_log("LineBotApiError replying:", e)
     except Exception as e:
         debug_log("Unexpected error replying:", e)
+
+def send_attendance_request(user_id, subject):
+    message = TemplateSendMessage(
+        alt_text=f"{subject} の出欠を記録してください",
+        template=ButtonsTemplate(
+            title=f"{subject} 出欠確認",
+            text="出席 / 遅刻 / 欠席 を選んでください",
+            actions=[
+                PostbackAction(label="✅ 出席", data=f"attend:{subject}:present"),
+                PostbackAction(label="⏰ 遅刻", data=f"attend:{subject}:late"),
+                PostbackAction(label="❌ 欠席", data=f"attend:{subject}:absent")
+            ]
+        )
+    )
+    line_bot_api.push_message(user_id, message)
+
+def save_attendance(user_id, subject, status):
+    """
+    出欠データを Supabase に保存する
+    status: present / late / absent
+    """
+    try:
+        supabase.table("attendance").insert({
+            "user_id": user_id,
+            "subject": subject,
+            "status": status,
+            "timestamp": datetime.now(tz=JST).isoformat()
+        }).execute()
+        debug_log(f"Saved attendance: {user_id}, {subject}, {status}")
+        return True
+    except Exception as e:
+        debug_log("save_attendance error:", e)
+        return False
+
 
 
 def call_openai_chat(messages, model="gpt-4o-mini"):
@@ -700,7 +746,6 @@ def handle_file_message(event):
         debug_log("handle_file_message unexpected error:", e)
         safe_reply(event.reply_token, "ファイルの処理中にエラーが発生しました。もう一度送ってください。")
 
-
 @handler.add(FollowEvent)
 def handle_follow(event):
     user_id = event.source.user_id
@@ -767,6 +812,30 @@ def notify_endpoint():
             supabase.table("notification_logs").insert({"user_id": uid, "event_id": None, "status": "error", "error": str(e)}).execute()
 
     return (f"sent:{successes}, failed:{failures}", 200)
+
+@handler.add(PostbackEvent)
+def handle_postback(event):
+    try:
+        user_id = event.source.user_id
+        data = event.postback.data  # 例: "attend:マーケティング論:present"
+        debug_log(f"Postback from {user_id}: {data}")
+
+        if data.startswith("attend:"):
+            _, subject, status = data.split(":", 2)
+            ok = save_attendance(user_id, subject, status)
+            if ok:
+                status_map = {
+                    "present": "✅ 出席",
+                    "late": "⏰ 遅刻",
+                    "absent": "❌ 欠席"
+                }
+                reply_text = f"{subject} の出欠を記録しました: {status_map.get(status, status)}"
+                safe_reply(event.reply_token, reply_text)
+            else:
+                safe_reply(event.reply_token, "⚠️ 出欠の保存に失敗しました。もう一度お試しください。")
+    except Exception as e:
+        debug_log("handle_postback error:", e)
+        safe_reply(event.reply_token, "⚠️ エラーが発生しました。")
 
 
 
