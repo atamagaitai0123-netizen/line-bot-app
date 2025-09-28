@@ -833,19 +833,27 @@ Campus Navigator @明治大学経営学部 へ 👋
 ・「単位確認」 → 卒業に必要な単位の状況をチェック
 ・「アドバイス」 → AIが履修の相談に回答
 
-📝 学生生活サポート
+📝 出欠管理
+・授業ごとに「出席」「遅刻」「欠席」を記録
+・「ランキング」 → 出席状況を危険順に確認
+・毎週日曜夜に出欠状況を自動通知
+
+📖 学生生活サポート
 ・「楽単フォーム」 → 授業情報の共有フォーム
 ・「事務室」 → 学部事務室の連絡先を表示
 ・その他の質問や雑談にも対応（AIに相談できます）
 
 ℹ️ 注意事項
 - サーバーの状況によって、まれに応答が遅れることがあります
-- 学事予定は大学公式カレンダーを基にしています
+- 学事予定・シラバス情報は、大学が配布している公式資料に基づいています
 
 まずは「今日の予定」と送って試してみてください ✅
 """
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=intro_text))
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=intro_text)
+    )
 
 @app.route("/notify", methods=["POST", "GET"])
 def notify_endpoint():
