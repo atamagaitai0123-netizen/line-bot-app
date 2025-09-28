@@ -83,14 +83,54 @@ def parse_row(info: str, grade: str):
         "成績評価": normalize(grade),
     }
 
+# --- ここから追加（既存コードは変更していません） ---
+def get_category_by_page(page_num: int) -> str:
+    """
+    PDFページ番号から科目区分を返す（ユーザ指定のページ範囲に基づく）
+    21〜26 学部必修, 27〜90 教養, 91〜178 外国語, 179〜182 体育実技, 183〜390 自由履修
+    """
+    try:
+        p = int(page_num)
+    except Exception:
+        return "不明"
+
+    if 21 <= p <= 26:
+        return "学部必修科目"
+    elif 27 <= p <= 90:
+        return "教養科目"
+    elif 91 <= p <= 178:
+        return "外国語科目"
+    elif 179 <= p <= 182:
+        return "体育実技科目"
+    elif 183 <= p <= 390:
+        return "自由履修科目"
+    else:
+        return "不明"
+# --- ここまで追加 ---
+
+
 def main():
     df = pd.read_csv(INPUT_CSV)
 
     parsed_rows = []
     for _, row in df.iterrows():
-        parsed_rows.append(parse_row(row.get("科目情報", ""), row.get("成績評価", "")))
+        # 既存の parse 処理はそのまま
+        parsed = parse_row(row.get("科目情報", ""), row.get("成績評価", ""))
 
-    out_df = pd.DataFrame(parsed_rows, columns=["授業名・教員", "単位", "年次", "学期", "キャンパス", "成績評価"])
+        # --- ここから追加: page列を読み取って科目区分を付与 ---
+        # CSVに存在する可能性のあるページ列名を順にチェック
+        page_val = None
+        for key in ("ページ", "page", "Page"):
+            if key in row and pd.notna(row.get(key)):
+                page_val = row.get(key)
+                break
+        # デフォルトは0（判定関数側で不明扱い）
+        parsed["科目区分"] = get_category_by_page(page_val if page_val is not None else 0)
+        # --- ここまで追加 ---
+
+        parsed_rows.append(parsed)
+
+    out_df = pd.DataFrame(parsed_rows, columns=["授業名・教員", "単位", "年次", "学期", "キャンパス", "成績評価", "科目区分"])
     out_df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
 
     print(f"✅ 解析済みCSVを出力しました: {OUTPUT_CSV}")

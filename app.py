@@ -6,13 +6,16 @@ import tempfile
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, FileMessage
-from linebot.models import FollowEvent
+from linebot.models import (
+    MessageEvent, TextMessage, TextSendMessage, FileMessage,
+    FollowEvent, QuickReply, QuickReplyButton, MessageAction  # ★ 追加
+)
 from supabase import create_client, Client
 from openai import OpenAI
 import pdf_reader  # あなたが提供している pdf_reader.py を使う想定
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+
 
 JST = ZoneInfo("Asia/Tokyo")
 NOTIFY_SECRET = os.getenv("NOTIFY_SECRET", None)
@@ -248,6 +251,50 @@ def fetch_curriculum_docs(faculty: str, department: str):
         debug_log("fetch_curriculum_docs error:", e)
         return []
 
+def compare_grades_with_requirements(user_id):
+    """
+    ユーザーの成績と必修条件を比較して不足単位を算出する。
+    """
+    try:
+        # 1. プロフィール取得
+        res_user = supabase.table("users").select("*").eq("line_user_id", user_id).execute()
+        if not res_user.data:
+            return "❌ まずプロフィールを登録してください。"
+        profile = res_user.data[0]
+        faculty = profile.get("faculty")
+        department = profile.get("department", "経営学科")  # デフォルト値
+
+        # 2. カリキュラム要件取得
+        reqs = fetch_curriculum_docs(faculty, department)
+        if not reqs:
+            return f"❌ {faculty} {department} の履修要件が見つかりません。"
+
+        # 3. 成績データ取得
+        grades_text, grades_list = fetch_saved_grades(user_id)
+        if not grades_list:
+            return "❌ 成績データが見つかりません。まずPDFをアップロードしてください。"
+
+        # 4. 突き合わせ
+        earned_by_cat = {g.get("category"): g.get("earned", 0) for g in grades_list}
+        lines = ["📊 不足単位チェック結果"]
+
+        for r in reqs:
+            cat = r.get("category")
+            required = r.get("required_units", 0)
+            earned = earned_by_cat.get(cat, 0)
+            deficit = required - earned
+            if deficit > 0:
+                lines.append(f"- {cat}: あと {deficit} 単位必要（{earned}/{required}）")
+            else:
+                lines.append(f"- {cat}: ✅ クリア（{earned}/{required}）")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        debug_log("compare_grades_with_requirements error:", e)
+        return "❌ 不足単位チェック中にエラーが発生しました。"
+
+
 
 def format_curriculum_docs(faculty, department, rows):
     if not rows:
@@ -272,6 +319,8 @@ def format_curriculum_docs(faculty, department, rows):
 
 # ---- プロフィール登録用 ----
 user_states = {}
+# ---- 授業登録用 ----
+class_states = {}
 
 def save_profile(user_id, data):
     """プロフィール情報を Supabase に保存"""
@@ -353,34 +402,53 @@ def handle_text_message(event):
             safe_reply(event.reply_token, "学部を入力してください（例：経営学部）")
             return
 
-        if user_id in user_states:
-            state = user_states[user_id]
+                # === 📚 授業登録機能 ===
+        if text_raw == "授業登録":
+            class_states[user_id] = {"step": 1, "data": {}}
+            safe_reply(event.reply_token, "授業名を入力してください（例: マーケティング論）")
+            return
+
+        if user_id in class_states:
+            state = class_states[user_id]
             step = state["step"]
 
             if step == 1:
-                state["data"]["faculty"] = text_raw
+                state["data"]["subject"] = text_raw
                 state["step"] = 2
-                safe_reply(event.reply_token, "学年を入力してください（例：2）")
+                # 曜日を QuickReply で選択
+                items = ["月", "火", "水", "木", "金", "土"]
+                buttons = [QuickReplyButton(action=MessageAction(label=day, text=day)) for day in items]
+                message = TextSendMessage(
+                    text="曜日を選んでください 👇",
+                    quick_reply=QuickReply(items=buttons)
+                )
+                line_bot_api.reply_message(event.reply_token, message)
                 return
 
             elif step == 2:
-                state["data"]["grade"] = text_raw
+                state["data"]["day_of_week"] = text_raw
                 state["step"] = 3
-                safe_reply(event.reply_token, "組を入力してください（例：A組、スキップなら空欄）")
+                safe_reply(event.reply_token, "何限ですか？（例: 2）")
                 return
 
             elif step == 3:
-                state["data"]["class_group"] = text_raw
-                state["step"] = 4
-                safe_reply(event.reply_token, "キャンパスを入力してください（和泉 or 駿河台）")
-                return
+                try:
+                    state["data"]["period"] = int(text_raw)
+                except ValueError:
+                    safe_reply(event.reply_token, "❌ 数字で入力してください（例: 2）")
+                    return
 
-            elif step == 4:
-                state["data"]["campus"] = text_raw
-                save_profile(user_id, state["data"])
-                del user_states[user_id]
-                safe_reply(event.reply_token, "✅ プロフィールを登録しました！来年度は再登録をお願いします。")
+                # Supabase に保存
+                supabase.table("user_classes").insert({
+                    "user_id": user_id,
+                    **state["data"]
+                }).execute()
+
+                del class_states[user_id]
+                safe_reply(event.reply_token, "✅ 授業を登録しました！")
                 return
+        # === 📚 授業登録ここまで ===
+
 
 
         wants_advice = any(k in text for k in ["アドバイス".lower(), "助言".lower(), "advice"])
@@ -479,24 +547,37 @@ def handle_text_message(event):
             if not grades_text and not grades_list:
                 safe_reply(event.reply_token, "❌ 成績データが見つかりません。まずはPDFを送ってください。")
                 return
+
+            # 不足単位チェックを追加
+            shortage_report = compare_grades_with_requirements(user_id)
+
             prompt_system = (
                 "あなたは明治大学の学生をサポートするアシスタントです。"
-                "以下に与える成績状況（文章と構造化データ）を元に、卒業要件の達成状況、"
-                "不足単位がある場合の優先度の高い履修提案、履修順序や注意点を具体的に助言してください。"
-                "数字は正確に扱ってください。"
-                "アドバイスは、要点を得ていて長文にならないようにしてください。"
+                "以下に与える成績状況と不足単位チェック結果を参考に、"
+                "卒業要件の達成状況、優先して履修すべき科目、履修順序や注意点を具体的に助言してください。"
+                "アドバイスは簡潔かつ要点を押さえてください。"
             )
-            user_content = f"成績レポート:\n{grades_text}\n\n構造化データ:\n{json.dumps(grades_list, ensure_ascii=False)}"
+
+            user_content = (
+                f"成績レポート:\n{grades_text}\n\n"
+                f"不足単位チェック:\n{shortage_report}\n\n"
+                f"構造化データ:\n{json.dumps(grades_list, ensure_ascii=False)}"
+            )
+
             messages = [
                 {"role": "system", "content": prompt_system},
                 {"role": "user", "content": user_content}
             ]
+
             ai_text = call_openai_chat(messages)
             if ai_text is None:
                 safe_reply(event.reply_token, "💡 アドバイス生成に失敗しました。時間をおいてもう一度試してください。")
             else:
-                safe_reply(event.reply_token, ai_text)
+                # AIアドバイスと不足単位チェックをまとめて返す
+                reply_text = f"{shortage_report}\n\n💡 AIからのアドバイス:\n{ai_text}"
+                safe_reply(event.reply_token, reply_text)
             return
+
 
         # 2) 成績表示
         if wants_grades_check:
