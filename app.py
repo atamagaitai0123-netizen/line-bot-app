@@ -64,6 +64,65 @@ def safe_reply(reply_token, text):
     except Exception as e:
         debug_log("Unexpected error replying:", e)
 
+def get_attendance_risk_report(user_id):
+    """
+    ユーザーの全授業について危険度を評価し、危険順に並べて返す
+    """
+    try:
+        # まずユーザーが登録した授業を取得
+        res_classes = supabase.table("user_classes") \
+            .select("subject") \
+            .eq("user_id", user_id) \
+            .execute()
+        classes = [c["subject"] for c in res_classes.data] if res_classes.data else []
+
+        if not classes:
+            return "❌ 授業が登録されていません。まずは授業登録してください。"
+
+        report = []
+
+        for subject in classes:
+            res = supabase.table("attendance") \
+                .select("status") \
+                .eq("user_id", user_id) \
+                .eq("subject", subject) \
+                .execute()
+            records = res.data if res and res.data else []
+
+            absents = sum(1 for r in records if r["status"] == "absent")
+            lates = sum(1 for r in records if r["status"] == "late")
+
+            # 危険度スコアをつける（数値化するとランキング可能）
+            score = absents * 2 + lates  # 欠席を重くカウント
+            if score >= 3:
+                level = "🚨 危険"
+            elif score >= 2:
+                level = "⚠️ 注意"
+            else:
+                level = "✅ セーフ"
+
+            report.append({
+                "subject": subject,
+                "absents": absents,
+                "lates": lates,
+                "level": level,
+                "score": score
+            })
+
+        # 危険度スコア順にソート（高い順）
+        report.sort(key=lambda x: x["score"], reverse=True)
+
+        # 表示用の文字列に整形
+        lines = ["📊 出席状況ランキング（危険順）"]
+        for r in report:
+            lines.append(f"{r['level']} {r['subject']} | 欠席 {r['absents']} | 遅刻 {r['lates']}")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"⚠️ 出席状況の集計でエラーが発生しました: {e}"
+
+
 def send_attendance_request(user_id, subject):
     message = TemplateSendMessage(
         alt_text=f"{subject} の出欠を記録してください",
@@ -427,6 +486,12 @@ def handle_text_message(event):
             )
             safe_reply(event.reply_token, guide_text)
             return
+        
+        if text_raw == "出席ランキング":
+            risk_report = get_attendance_risk_report(user_id)
+            safe_reply(event.reply_token, risk_report)
+            return
+
 
         if text_raw == "年間行事予定":
             urls = [
@@ -848,6 +913,23 @@ def class_notify():
             debug_log("class_notify error sending:", e)
 
     return (f"notified:{len(matches)}", 200)
+
+@app.route("/risk_notify", methods=["POST", "GET"])
+def risk_notify():
+    token = request.args.get("token") or request.headers.get("X-Notify-Token")
+    if NOTIFY_SECRET and token != NOTIFY_SECRET:
+        return ("Unauthorized", 401)
+
+    user_ids = get_subscribed_user_ids()
+    count = 0
+    for uid in user_ids:
+        report = get_attendance_risk_report(uid)
+        # 危険な授業があるユーザーにだけ送信
+        if "⚠️" in report or "危険" in report:
+            line_bot_api.push_message(uid, TextSendMessage(text=report))
+            count += 1
+    return (f"sent:{count}", 200)
+
 
 @handler.add(PostbackEvent)
 def handle_postback(event):
