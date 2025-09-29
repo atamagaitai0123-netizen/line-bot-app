@@ -902,8 +902,8 @@ def class_notify():
         end_time = datetime.strptime(times["end"], "%H:%M").replace(
         year=now.year, month=now.month, day=now.day, tzinfo=JST
         )
-        # 授業終了時刻から ±5分以内なら通知
-        if abs((now - end_time).total_seconds()) <= 300:
+        # 授業終了時刻ちょうどなら通知（例: 12:30）
+        if now.strftime("%H:%M") == times["end"]:
             res = supabase.table("user_classes") \
                 .select("*") \
                 .eq("day_of_week", weekday) \
@@ -911,6 +911,7 @@ def class_notify():
                 .execute()
             if res and res.data:
                 matches.extend(res.data)
+
 
 
     # 出欠ボタンを送信
