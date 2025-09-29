@@ -426,6 +426,9 @@ def format_curriculum_docs(faculty, department, rows):
 user_states = {}
 # ---- 授業登録用 ----
 class_states = {}
+# ---- 課題登録用 ----
+assignment_states = {}
+
 
 def save_profile(user_id, data):
     """プロフィール情報を Supabase に保存"""
@@ -441,6 +444,30 @@ def save_profile(user_id, data):
         debug_log(f"Saved profile for {user_id}: {data}")
     except Exception as e:
         debug_log("save_profile error:", e)
+
+def save_assignment(user_id, title, due_date):
+    """課題を Supabase に保存"""
+    try:
+        supabase.table("assignments").insert({
+            "user_id": user_id,
+            "title": title,
+            "due_date": due_date,
+            "created_at": datetime.now(tz=JST).isoformat()
+        }).execute()
+        debug_log(f"Saved assignment: {user_id}, {title}, {due_date}")
+        return True
+    except Exception as e:
+        debug_log("save_assignment error:", e)
+        return False
+
+def fetch_assignments(user_id, until_date=None):
+    """ユーザーの課題を締切順に取得"""
+    q = supabase.table("assignments").select("*").eq("user_id", user_id).order("due_date", desc=False)
+    if until_date:
+        q = q.lte("due_date", until_date.isoformat())
+    res = q.execute()
+    return res.data if res and res.data else []
+
 
 
 # ---- ルート ----
@@ -559,8 +586,35 @@ def handle_text_message(event):
                 safe_reply(event.reply_token, "✅ 授業を登録しました！")
                 return
         # === 📚 授業登録ここまで ===
+        
+        # ---- 課題登録用 ----
 
 
+        if text_raw == "課題登録":
+            assignment_states[user_id] = {"step": 1, "data": {}}
+            safe_reply(event.reply_token, "課題のタイトルを入力してください（例: レポート提出）")
+            return
+
+        if user_id in assignment_states:
+            state = assignment_states[user_id]
+            step = state["step"]
+
+            if step == 1:
+                state["data"]["title"] = text_raw
+                state["step"] = 2
+                safe_reply(event.reply_token, "締切日を入力してください（例: 2025-10-05）")
+                return
+
+            elif step == 2:
+                try:
+                    due_date = datetime.fromisoformat(text_raw).date()
+                    state["data"]["due_date"] = due_date.isoformat()
+                    save_assignment(user_id, state["data"]["title"], due_date)
+                    del assignment_states[user_id]
+                    safe_reply(event.reply_token, "✅ 課題を登録しました！")
+                except Exception:
+                    safe_reply(event.reply_token, "❌ 日付の形式が正しくありません。例: 2025-10-05")
+                return
 
         wants_advice = any(k in text for k in ["アドバイス".lower(), "助言".lower(), "advice"])
         wants_grades_check = any(k in text for k in ["成績", "単位", "成績確認"])
@@ -885,6 +939,30 @@ def notify_endpoint():
             supabase.table("notification_logs").insert({"user_id": uid, "event_id": None, "status": "error", "error": str(e)}).execute()
 
     return (f"sent:{successes}, failed:{failures}", 200)
+
+@app.route("/assignment_notify", methods=["POST", "GET"])
+def assignment_notify():
+    token = request.args.get("token") or request.headers.get("X-Notify-Token")
+    if NOTIFY_SECRET and token != NOTIFY_SECRET:
+        return ("Unauthorized", 401)
+
+    today = datetime.now(tz=JST).date()
+    user_ids = get_subscribed_user_ids()
+
+    for uid in user_ids:
+        assignments = fetch_assignments(uid, until_date=today)
+        if assignments:
+            lines = ["📌 今日までに提出の課題:"]
+            for a in assignments:
+                lines.append(f"- {a['title']}（締切 {a['due_date']}）")
+            body = "\n".join(lines)
+            try:
+                line_bot_api.push_message(uid, TextSendMessage(text=body))
+            except Exception as e:
+                debug_log("assignment_notify error:", e)
+
+    return ("done", 200)
+
 
 @app.route("/class_notify", methods=["POST", "GET"])
 def class_notify():
