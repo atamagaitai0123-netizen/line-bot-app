@@ -963,6 +963,44 @@ def assignment_notify():
 
     return ("done", 200)
 
+@app.route("/timetable_notify", methods=["GET", "POST"])
+def timetable_notify():
+    token = request.args.get("token") or request.headers.get("X-Notify-Token")
+    if NOTIFY_SECRET and token != NOTIFY_SECRET:
+        return ("Unauthorized", 401)
+
+    # 現在時刻
+    now = datetime.now(tz=JST)
+    tomorrow = now + timedelta(days=1)
+    weekday = ["月","火","水","木","金","土","日"][tomorrow.weekday()]
+
+    # 明日の授業を取得
+    res = supabase.table("user_classes") \
+        .select("user_id, subject, period") \
+        .eq("day_of_week", weekday) \
+        .execute()
+
+    if not res.data:
+        return ("no classes", 200)
+
+    # ユーザーごとにまとめて通知
+    from collections import defaultdict
+    user_classes = defaultdict(list)
+    for r in res.data:
+        user_classes[r["user_id"]].append(f"{r['period']}限 {r['subject']}")
+
+    sent = 0
+    for uid, classes in user_classes.items():
+        message = "📅 明日の時間割\n" + "\n".join(sorted(classes))
+        try:
+            line_bot_api.push_message(uid, TextSendMessage(text=message))
+            sent += 1
+        except Exception as e:
+            print(f"error sending to {uid}: {e}")
+
+    return (f"sent:{sent}", 200)
+
+
 
 @app.route("/class_notify", methods=["POST", "GET"])
 def class_notify():
