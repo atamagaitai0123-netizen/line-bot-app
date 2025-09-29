@@ -254,7 +254,9 @@ def format_syllabus_result(rows):
         category = r.get("category") or ""
 
         lines.append(
-            f"📖 {subject_teacher}\n単位: {units} | 年次: {year} | 学期: {term} | キャンパス: {campus}\n📝 {evaluation}"
+            f"📖 {subject_teacher}\n"
+            f"区分: {category} | 単位: {units} | 年次: {year} | 学期: {term} | キャンパス: {campus}\n"
+            f"📝 {evaluation}"
         )
 
     return "\n\n".join(lines)
