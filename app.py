@@ -925,8 +925,6 @@ Campus Navigator @明治大学経営学部 へ 👋
 
 まずは「プロフィール登録」と「授業登録」を行ってみてください ✅
 """
-s
-
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(text=intro_text)
