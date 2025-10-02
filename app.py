@@ -18,6 +18,24 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from linebot.models import TemplateSendMessage, ButtonsTemplate, PostbackAction
 
+# SPI分析用セッション管理
+spi_sessions = {}
+
+# 質問フロー定義
+QUESTIONS = [
+    {"id": "lang_long", "q": "🟨 長文読解の問題は出ましたか？（はい/いいえ）"},
+    {"id": "lang_blank", "q": "空欄補充の問題は出ましたか？（はい/いいえ）"},
+    {"id": "lang_blank_type", "q": "それは短文ですか？長文の中の小問ですか？（短文/長文）", "depends_on": "lang_blank"},
+    {"id": "lang_match", "q": "内容一致を問う問題は出ましたか？（はい/いいえ）"},
+    {"id": "lang_match_cb", "q": "チェックボックス形式でしたか？（はい/いいえ）", "depends_on": "lang_match"},
+    {"id": "math_first", "q": "🟦 非言語に入った最初の問題形式は何でしたか？（四則演算/表読み取り/推論/その他）"},
+    {"id": "table_count", "q": "表読み取りの問題は何問出ましたか？（数値）"},
+    {"id": "table_tabs", "q": "各問題のタブ数を教えてください（例: 4,2,2）", "depends_on": "table_count"},
+    {"id": "logic_count", "q": "推論の問題は何問出ましたか？（数値）"},
+    {"id": "logic_tabs", "q": "各問題のタブ数を教えてください（例: 3,4,2）", "depends_on": "logic_count"},
+    {"id": "logic_cb", "q": "推論のチェックボックス形式はありましたか？（はい/いいえ）", "depends_on": "logic_count"}
+]
+
 
 JST = ZoneInfo("Asia/Tokyo")
 NOTIFY_SECRET = os.getenv("NOTIFY_SECRET", None)
@@ -894,6 +912,7 @@ Campus Navigator @明治大学経営学部 へ 👋
 ・授業ごとに「出席」「遅刻」「欠席」を記録
 ・「ランキング」 → 出席状況を危険順に確認
 ・毎週日曜夜に出欠状況を自動通知
+⚠️ 利用には「プロフィール登録」と「授業登録」が必要です
 
 📖 学生生活サポート
 ・「楽単フォーム」 → 授業情報の共有フォーム
@@ -904,8 +923,9 @@ Campus Navigator @明治大学経営学部 へ 👋
 - サーバーの状況によって、まれに応答が遅れることがあります
 - 学事予定・シラバス情報は、大学が配布している公式資料に基づいています
 
-まずは「今日の予定」と送って試してみてください ✅
+まずは「プロフィール登録」と「授業登録」を行ってみてください ✅
 """
+
 
     line_bot_api.reply_message(
         event.reply_token,
