@@ -469,17 +469,25 @@ def save_profile(user_id, data):
 def save_assignment(user_id, title, due_date):
     """課題を Supabase に保存"""
     try:
-        supabase.table("assignments").insert({
+        # due_date を ISO 文字列に変換
+        if isinstance(due_date, (datetime, date)):
+            due_date_str = due_date.isoformat()
+        else:
+            due_date_str = str(due_date)
+
+        res = supabase.table("assignments").insert({
             "user_id": user_id,
             "title": title,
-            "due_date": due_date,
+            "due_date": due_date_str,
             "created_at": datetime.now(tz=JST).isoformat()
         }).execute()
-        debug_log(f"Saved assignment: {user_id}, {title}, {due_date}")
+        
+        debug_log(f"save_assignment result: {res}")
         return True
     except Exception as e:
         debug_log("save_assignment error:", e)
         return False
+
 
 def fetch_assignments(user_id, until_date=None):
     """ユーザーの課題を締切順に取得"""
